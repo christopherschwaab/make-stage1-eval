@@ -53,26 +53,26 @@ type Interpreter = StateT EvalState IO
 splitFields :: Text -> [Text]
 splitFields = words
 
-matchWild :: Bool -> Text -> Text -> (Char -> Text -> Bool) -> Bool
-matchWild wildMatchesEmpty pat t backtrack = case (uncons pat, uncons t) of
-  (Just ('%', pat'), yt'@(Just (y, t'))) -> longestMatch (uncons pat') y t' where
-    longestMatch p@(Just ('%', pat'')) y t' = y == '%'
-                                           && matchWild wildMatchesEmpty pat'' t' (longestMatch p)
-    longestMatch (Just (x,   pat''))   y t' = anyTill x pat'' (Just (y, t'))
-    longestMatch Nothing               _ _  = True
-    anyTill x pat'' (Just (y, t'))
-      | x == y    = matchWild wildMatchesEmpty pat'' t' (longestMatch (Just (x, pat'')))
-      | otherwise = anyTill x pat'' (uncons t')
-    anyTill x pat'' Nothing = False
-  (Just ('%', _),  Nothing) -> wildMatchesEmpty
-  (Just (x, pat'), Just (y, t')) -> if x == y then matchWild wildMatchesEmpty pat' t' backtrack
-                                      else backtrack y t'
-  (Just (x, _),    Nothing) -> False
-  (Nothing,        Just _)  -> False
-  (Nothing,        Nothing) -> True
+wild :: Bool -> Bool -> Text -> Text -> (Char -> Text -> Bool) -> Bool
+wild wildMatchesEmpty True (uncons -> Just ('%', pat')) (uncons -> Just (y, t')) backtrack =
+  longestMatch (uncons pat') y t'
+  where longestMatch (Just (x,   pat''))   y t' = anyTill x pat'' (Just (y, t'))
+        longestMatch Nothing               _ _  = True
+        anyTill x pat'' (Just (y, t'))
+          | x == y    = wild wildMatchesEmpty False pat'' t' (longestMatch (Just (x, pat'')))
+          | otherwise = anyTill x pat'' (uncons t')
+        anyTill x pat'' Nothing = False
+wild wildMatchesEmpty matchWild (uncons -> Just ('%', _)) (uncons -> Nothing) backtrack =
+  wildMatchesEmpty
+wild wildMatchesEmpty matchWild (uncons -> Just (x, pat')) (uncons -> Just (y, t')) backtrack
+  | x == y    = wild wildMatchesEmpty matchWild pat' t' backtrack
+  | otherwise = backtrack y t'
+wild wildMatchesEmpty matchWild (uncons -> Nothing)     (uncons -> Just (y, t'))  backtrack = backtrack y t'
+wild wildMatchesEmpty matchWild (uncons -> Just (x, _)) (uncons -> Nothing) backtrack = False
+wild wildMatchesEmpty matchWild (uncons -> Nothing)     (uncons -> Nothing) backtrack = True
 
 wildcard :: Text -> Text -> Bool
-wildcard pat t = matchWild True pat t (\_ _ -> False)
+wildcard pat t = wild True True pat t (\_ _ -> False)
 
 -- FIXME Whitespace preservation/collapse is surely wrong
 evalExp :: Exp -> Interpreter Value
