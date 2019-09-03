@@ -53,18 +53,26 @@ type Interpreter = StateT EvalState IO
 splitFields :: Text -> [Text]
 splitFields = words
 
+matchWild :: Bool -> Text -> Text -> (Char -> Text -> Bool) -> Bool
+matchWild wildMatchesEmpty pat t backtrack = case (uncons pat, uncons t) of
+  (Just ('%', pat'), yt'@(Just (y, t'))) -> longestMatch (uncons pat') y t' where
+    longestMatch p@(Just ('%', pat'')) y t' = y == '%'
+                                           && matchWild wildMatchesEmpty pat'' t' (longestMatch p)
+    longestMatch (Just (x,   pat''))   y t' = anyTill x pat'' (Just (y, t'))
+    longestMatch Nothing               _ _  = True
+    anyTill x pat'' (Just (y, t'))
+      | x == y    = matchWild wildMatchesEmpty pat'' t' (longestMatch (Just (x, pat'')))
+      | otherwise = anyTill x pat'' (uncons t')
+    anyTill x pat'' Nothing = False
+  (Just ('%', _),  Nothing) -> wildMatchesEmpty
+  (Just (x, pat'), Just (y, t')) -> if x == y then matchWild wildMatchesEmpty pat' t' backtrack
+                                      else backtrack y t'
+  (Just (x, _),    Nothing) -> False
+  (Nothing,        Just _)  -> False
+  (Nothing,        Nothing) -> True
+
 wildcard :: Text -> Text -> Bool
-wildcard pat t = case (uncons pat, uncons t) of
-  (Just ('%', pat'), yt'@(Just (y, t'))) -> case uncons pat' of
-    Just ('%', pat'') -> '%' == y && wildcard pat'' t'
-    Just (x, pat'') -> anyTill yt'
-      where anyTill (Just (y, t')) | x == y    = wildcard pat'' t'
-                                   | otherwise = anyTill (uncons t')
-            anyTill Nothing = False
-    Nothing -> True
-  (Just ('%', pat'), Nothing) -> True
-  (Just (x, pat'),   Just (y, t')) -> x == y && wildcard pat' t'
-  (Just (x, _),      Nothing) -> False
+wildcard pat t = matchWild True pat t (\_ _ -> False)
 
 -- FIXME Whitespace preservation/collapse is surely wrong
 evalExp :: Exp -> Interpreter Value
