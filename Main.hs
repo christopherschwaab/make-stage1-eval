@@ -33,7 +33,8 @@ data Exp
   deriving Show
 
 data Stmt
-  = Name := Exp
+  = BindDeferred Name Exp
+  | Name := Exp
   | Name :+= Exp
   | Name :!= Exp
   | SExp Exp
@@ -43,10 +44,16 @@ type Program = [Stmt]
 
 newtype Value = Value { fromValue :: Text }
   deriving Show
-type Env = Map Name Value
+data Binding = Immediate Value | Deferred Exp
+  deriving Show
+type Env = Map Name Binding
 data EvalState = EvalState
   { env :: Env }
   deriving Show
+
+evalBinding :: Binding -> Interpreter Value
+evalBinding (Immediate v) = return v
+evalBinding (Deferred e)  = evalExp e
 
 type Interpreter = StateT EvalState IO
 
@@ -90,7 +97,7 @@ evalExp :: Exp -> Interpreter Value
 evalExp (Foreach e1 e2 e3) = do
   Value x <- evalExp e1
   ws <- splitFields . fromValue <$> evalExp e3
-  ws' <- mapM (\w -> withStateT (\st -> EvalState{env=Map.insert x (Value w) (env st)})
+  ws' <- mapM (\w -> withStateT (\st -> EvalState{env=Map.insert x (Immediate (Value w)) (env st)})
                                 (evalExp e2))
               ws
   return (Value (intercalate " " (map fromValue ws')))
@@ -103,13 +110,13 @@ evalExp (Shell e) = do Value t <- evalExp e
                          out <- Sh.run "/bin/sh" ["-c", t]
                          exitStatus <- Sh.lastExitCode
                          return (Value (showt exitStatus), T.replace "\n" " " out))
-                       modify (\st -> EvalState{env=Map.insert ".SHELLOUT" exitStatus (env st)})
+                       modify (\st -> EvalState{env=Map.insert ".SHELLOUT" (Immediate exitStatus) (env st)})
                        return (Value out)
 evalExp (Lit t) = return (Value t)
 evalExp (Var e) = do Value x <- evalExp e
                      p <- env <$> get
                      case Map.lookup x p of
-                       Just v -> return v
+                       Just b -> evalBinding b
                        Nothing -> undefined
 evalExp (Cat e1 e2) = Value <$> (append <$> (fromValue <$> evalExp e1)
                                         <*> (fromValue <$> evalExp e2))
@@ -130,8 +137,9 @@ evalExp (Varsubst e1 e2 e3) = do
   p <- env <$> get
   case Map.lookup x p of
     Nothing -> undefined
-    Just (Value v) -> let x' = map (substSuffix suffix replacement) (T.words v)
-                      in return (Value (intercalate " " x'))
+    Just b -> do Value v <- evalBinding b
+                 let x' = map (substSuffix suffix replacement) (T.words v)
+                 return (Value (intercalate " " x'))
   where substSuffix :: Text -> Text -> Text -> Text
         substSuffix suffix replacement t = case T.stripSuffix suffix t of
           Nothing -> t
@@ -139,20 +147,26 @@ evalExp (Varsubst e1 e2 e3) = do
 evalExp (Call e1 e2) = do
   args <- T.lines . fromValue <$> evalExp e2
   withStateT (\st ->
-    EvalState{env=foldr (\(n, arg) p -> Map.insert (showt n) (Value arg) p)
+    EvalState{env=foldr (\(n, arg) p -> Map.insert (showt n) (Immediate (Value arg)) p)
                         (env st)
                         (zip [(1::Int)..] args)})
     (evalExp e1)
 
 evalStmt :: Stmt -> Interpreter ()
+evalStmt (BindDeferred x e) = modify (\st -> EvalState {env=Map.insert x (Deferred e) (env st)})
 evalStmt (x := e) = do v <- evalExp e
-                       modify (\st -> EvalState {env=Map.insert x v (env st)})
-evalStmt (x :+= e) = do v' <- evalExp e
-                        modify (\st -> EvalState {env=Map.alter (Just . insertOrAppend v') x (env st)})
-  where insertOrAppend v' (Just v) = Value (fromValue v `append` " " `append` fromValue v')
-        insertOrAppend v' Nothing  = v'
+                       modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
+evalStmt (x :+= e) = do
+  p <- env <$> get
+  p' <- case Map.lookup x p of
+          Just (Immediate (Value v')) -> do
+            Value v <- evalExp e
+            return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
+          Just (Deferred e') -> return (Map.insert x (Deferred (e' `Cat` Lit " " `Cat` e)) p)
+          Nothing -> undefined -- what does make do in this case?
+  put (EvalState{env=p'})
 evalStmt (x :!= e) = do v <- evalExp (Shell e)
-                        modify (\st -> EvalState {env=Map.insert x v (env st)})
+                        modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
 evalStmt (SExp e) = () <$ evalExp e
 
 run :: Program -> IO EvalState
