@@ -4,7 +4,7 @@ module Main where
 import Control.Applicative
 import Control.Monad.State.Lazy
 import Data.Map.Strict (Map)
-import Data.Maybe (isJust)
+import Data.Maybe (isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, append, intercalate, pack, uncons, unpack)
 import qualified Data.Text as T
@@ -22,6 +22,8 @@ type Name = Text
 data Exp
   = Foreach Exp Exp Exp -- Collapses whitespace
   | Filter Exp Exp -- collapses whitespace?
+  | FilterOut Exp Exp -- collapses whitespace?
+  | If Exp Exp Exp -- collapses whitespace?
   | Shell Exp -- Collapses whitespace
   | Lit Text
   | Var Exp
@@ -30,6 +32,7 @@ data Exp
   | Patsubst Exp Exp Exp -- Collapses whitespace?
   | Varsubst Exp Exp Exp -- Collapses whitespace
   | Call Exp Exp -- Collapses whitespace
+  | Error Exp
   deriving Show
 
 data Stmt
@@ -38,6 +41,9 @@ data Stmt
   | Name :+= Exp
   | Name :!= Exp
   | SExp Exp
+  | Skip
+  | Ifeq Exp Exp Stmt Stmt
+  | Ifneq Exp Exp Stmt Stmt
   deriving Show
 
 type Program = [Stmt]
@@ -105,6 +111,13 @@ evalExp (Filter e1 e2) = do pat <- fromValue <$> evalExp e1
                             ws <- splitFields . fromValue <$> evalExp e2
                             let ws' = filter (isJust . matchPat pat) ws
                             return (Value (intercalate " " ws'))
+evalExp (FilterOut e1 e2) = do pat <- fromValue <$> evalExp e1
+                               ws <- splitFields . fromValue <$> evalExp e2
+                               let ws' = filter (isNothing . matchPat pat) ws
+                               return (Value (intercalate " " ws'))
+evalExp (If e1 e2 e3) = do Value p <- evalExp e1
+                           if T.null p then evalExp e2
+                             else evalExp e3
 evalExp (Shell e) = do Value t <- evalExp e
                        (exitStatus, out) <- lift (Sh.shelly . Sh.silently $ do
                          out <- Sh.run "/bin/sh" ["-c", t]
@@ -151,6 +164,7 @@ evalExp (Call e1 e2) = do
                         (env st)
                         (zip [(1::Int)..] args)})
     (evalExp e1)
+evalExp (Error e) = error . unpack . fromValue <$> evalExp e
 
 evalStmt :: Stmt -> Interpreter ()
 evalStmt (BindDeferred x e) = modify (\st -> EvalState {env=Map.insert x (Deferred e) (env st)})
@@ -168,6 +182,15 @@ evalStmt (x :+= e) = do
 evalStmt (x :!= e) = do v <- evalExp (Shell e)
                         modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
 evalStmt (SExp e) = () <$ evalExp e
+evalStmt Skip = return ()
+evalStmt (Ifeq e1 e2 s1 s2) = do Value v1 <- evalExp e1
+                                 Value v2 <- evalExp e2
+                                 if v1 == v2 then evalStmt s1
+                                   else evalStmt s2
+evalStmt (Ifneq e1 e2 s1 s2) = do Value v1 <- evalExp e1
+                                  Value v2 <- evalExp e2
+                                  if v1 /= v2 then evalStmt s1
+                                    else evalStmt s2
 
 run :: Program -> IO EvalState
 run p = execStateT (mapM_ evalStmt p) (EvalState{env=Map.empty})
