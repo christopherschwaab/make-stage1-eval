@@ -3,14 +3,17 @@ module Main where
 
 import Control.Applicative
 import Control.Monad.State.Lazy
+import Data.List (sort)
 import Data.Map.Strict (Map)
 import Data.Maybe (isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, append, intercalate, pack, uncons, unpack)
 import qualified Data.Text as T
+import qualified Data.Text.Read as TR
 import Data.Traversable (sequence)
 import qualified Shelly as Sh
 import Data.Void (Void)
+import System.FilePath (dropExtensions, dropFileName, takeFileName)
 import System.FilePath.Glob (compileWith, compPosix, globDir1)
 import Text.Megaparsec
 import TextShow
@@ -24,6 +27,7 @@ data Exp
   | Filter Exp Exp -- collapses whitespace?
   | FilterOut Exp Exp -- collapses whitespace?
   | If Exp Exp Exp -- collapses whitespace?
+  | And [Exp] -- collapses whitespace?
   | Shell Exp -- Collapses whitespace
   | Lit Text
   | Var Exp
@@ -33,6 +37,18 @@ data Exp
   | Varsubst Exp Exp Exp -- Collapses whitespace
   | Call Exp Exp -- Collapses whitespace
   | Error Exp
+  | Sort Exp
+  | Subst Exp Exp Exp
+  | Word Exp Exp
+  | Firstword Exp
+  | Dir Exp
+  | Notdir Exp
+  | Basename Exp
+  -- | Wordlist Exp Exp Exp
+  -- | Strip Exp
+  -- | AddSuffix Exp Exp
+  -- | Abspath Exp Exp
+  -- | Eval FIXME
   deriving Show
 
 data Stmt
@@ -118,6 +134,11 @@ evalExp (FilterOut e1 e2) = do pat <- splitFields . fromValue <$> evalExp e1
 evalExp (If e1 e2 e3) = do Value p <- evalExp e1
                            if T.null p then evalExp e2
                              else evalExp e3
+evalExp (And es) = evalAnd "" es where
+  evalAnd r (e:es) = do Value v <- evalExp e
+                        if T.null v then return (Value "")
+                          else evalAnd v es
+  evalAnd r [] = return (Value r)
 evalExp (Shell e) = do Value t <- evalExp e
                        (exitStatus, out) <- lift (Sh.shelly . Sh.silently $ do
                          out <- Sh.run "/bin/sh" ["-c", t]
@@ -165,6 +186,22 @@ evalExp (Call e1 e2) = do
                         (zip [(1::Int)..] args)})
     (evalExp e1)
 evalExp (Error e) = error . unpack . fromValue <$> evalExp e
+evalExp (Sort e) = Value . intercalate " " . sort . splitFields . fromValue <$> evalExp e
+evalExp (Subst e1 e2 e3) = undefined
+evalExp (Word e1 e2) = do Value v1 <- evalExp e1
+                          case TR.decimal v1 of
+                            Left err -> undefined -- what does make do?
+                            Right (n,v1') -> if T.null v1'
+                                               then do vs <- splitFields . fromValue <$> evalExp e2
+                                                       return (Value (vs!!n))
+                                               else undefined -- what does make do?
+evalExp (Firstword e) = Value . head . splitFields . fromValue <$> evalExp e -- what does make do for an empty list?
+evalExp (Dir e) = Value . intercalate " " . map dirname . splitFields . fromValue <$> evalExp e
+  where dirname = pack . dropFileName . unpack
+evalExp (Notdir e) = Value . intercalate " " . map notdir . splitFields . fromValue <$> evalExp e
+  where notdir = pack . takeFileName . unpack
+evalExp (Basename e) = Value . intercalate " " . map basename . splitFields . fromValue <$> evalExp e
+  where basename = pack . dropExtensions . unpack
 
 evalStmt :: Stmt -> Interpreter ()
 evalStmt (BindDeferred x e) = modify (\st -> EvalState {env=Map.insert x (Deferred e) (env st)})
