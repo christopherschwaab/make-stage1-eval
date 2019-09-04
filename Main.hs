@@ -52,10 +52,10 @@ data Exp
   deriving Show
 
 data Stmt
-  = BindDeferred Name Exp
-  | Name := Exp
-  | Name :+= Exp
-  | Name :!= Exp
+  = BindDeferred Exp Exp
+  | Exp := Exp
+  | Exp :+= Exp
+  | Exp :!= Exp
   | SExp Exp
   | Skip
   | Ifeq Exp Exp Stmt Stmt
@@ -179,6 +179,8 @@ evalExp (Varsubst e1 e2 e3) = do
           Nothing -> t
           Just t' -> t' `append` replacement
 evalExp (Call e1 e2) = do
+  -- This explicitly assumes that make has implemented arguments incorrectly so check if
+  -- assignment can overwrite argument values.
   args <- T.lines . fromValue <$> evalExp e2
   withStateT (\st ->
     EvalState{env=foldr (\(n, arg) p -> Map.insert (showt n) (Immediate (Value arg)) p)
@@ -204,20 +206,24 @@ evalExp (Basename e) = Value . intercalate " " . map basename . splitFields . fr
   where basename = pack . dropExtensions . unpack
 
 evalStmt :: Stmt -> Interpreter ()
-evalStmt (BindDeferred x e) = modify (\st -> EvalState {env=Map.insert x (Deferred e) (env st)})
-evalStmt (x := e) = do v <- evalExp e
-                       modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
-evalStmt (x :+= e) = do
+evalStmt (BindDeferred e1 e2) = do Value x <- evalExp e1
+                                   modify (\st -> EvalState {env=Map.insert x (Deferred e2) (env st)})
+evalStmt (e1 := e2) = do Value x <- evalExp e1
+                         v <- evalExp e2
+                         modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
+evalStmt (e1 :+= e2) = do
   p <- env <$> get
+  Value x <- evalExp e1
   p' <- case Map.lookup x p of
           Just (Immediate (Value v')) -> do
-            Value v <- evalExp e
+            Value v <- evalExp e2
             return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
-          Just (Deferred e') -> return (Map.insert x (Deferred (e' `Cat` Lit " " `Cat` e)) p)
+          Just (Deferred e') -> return (Map.insert x (Deferred (e' `Cat` Lit " " `Cat` e2)) p)
           Nothing -> undefined -- what does make do in this case?
   put (EvalState{env=p'})
-evalStmt (x :!= e) = do v <- evalExp (Shell e)
-                        modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
+evalStmt (e1 :!= e2) = do Value x <- evalExp e1
+                          v <- evalExp (Shell e2)
+                          modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
 evalStmt (SExp e) = () <$ evalExp e
 evalStmt Skip = return ()
 evalStmt (Ifeq e1 e2 s1 s2) = do Value v1 <- evalExp e1
@@ -234,10 +240,10 @@ run p = execStateT (mapM_ evalStmt p) (EvalState{env=Map.empty})
 
 main :: IO ()
 main = print =<< (run $
-  ["x" := Lit "xvalue"
-  ,"xvalue" := Lit "pig"
-  ,"z" := Var (Lit "x")
+  [Lit "x" := Lit "xvalue"
+  ,Lit "xvalue" := Lit "pig"
+  ,Lit "z" := Var (Lit "x")
   ,SExp (Shell (Lit "echo " `Cat` Wildcard (Lit "*/*.cache")))
-  ,"y" := Shell (Lit "ls -1")
-  ,"q" := Patsubst (Lit "%.c") (Lit "%.o") (Lit "a.c b.c c.c.c a.h")
-  ,"q'" := Varsubst (Lit "q") (Lit ".o") (Lit ".c")])
+  ,Lit "y" := Shell (Lit "ls -1")
+  ,Lit "q" := Patsubst (Lit "%.c") (Lit "%.o") (Lit "a.c b.c c.c.c a.h")
+  ,Lit "q'" := Varsubst (Lit "q") (Lit ".o") (Lit ".c")])
