@@ -27,8 +27,8 @@ data Exp
   | Var Exp
   | Cat Exp Exp
   | Wildcard Exp
-  -- | Patsubst Exp Exp Exp
-  | Varsubst Name Exp Exp -- Collapses whitespace
+  | Patsubst Exp Exp Exp -- Collapses whitespace?
+  | Varsubst Exp Exp Exp -- Collapses whitespace
   | Call Exp Exp -- Collapses whitespace
   deriving Show
 
@@ -80,6 +80,11 @@ matchPat pat = case uncons pat of
                              matchPat pat' t'
   Nothing -> \t -> if T.null t then Just "" else Nothing
 
+patsubst :: Text -> Text -> Text -> Text
+patsubst pat replacement t = case matchPat pat t of
+  Just match -> T.replace "%" match replacement -- FIXME does make only replace the first %?
+  Nothing -> t
+
 -- FIXME Whitespace preservation/collapse is surely wrong
 evalExp :: Exp -> Interpreter Value
 evalExp (Foreach e1 e2 e3) = do
@@ -108,13 +113,29 @@ evalExp (Var e) = do Value x <- evalExp e
                        Nothing -> undefined
 evalExp (Cat e1 e2) = Value <$> (append <$> (fromValue <$> evalExp e1)
                                         <*> (fromValue <$> evalExp e2))
+evalExp (Patsubst e1 e2 e3) = do
+  Value pat <- evalExp e1
+  Value replacement <- evalExp e2
+  ts <- T.words . fromValue <$> evalExp e3
+  let ts' = map (patsubst pat replacement) ts
+  return (Value (intercalate " " ts'))
 evalExp (Wildcard e) = do Value pattern <- evalExp e
                           lift (spaceSeparate . map pack <$> globInCwd (unpack pattern))
   where spaceSeparate = Value . intercalate " "
         globInCwd p = globDir1 (compileWith compPosix p) ""
-evalExp (Varsubst x e1 e2) = Value <$> (T.replace <$> (fromValue <$> evalExp e1)
-                                                  <*> (fromValue <$> evalExp e2)
-                                                  <*> undefined) -- lookup x in env
+evalExp (Varsubst e1 e2 e3) = do
+  Value x <- evalExp e1
+  Value suffix <- evalExp e2
+  Value replacement <- evalExp e3
+  p <- env <$> get
+  case Map.lookup x p of
+    Nothing -> undefined
+    Just (Value v) -> let x' = map (substSuffix suffix replacement) (T.words v)
+                      in return (Value (intercalate " " x'))
+  where substSuffix :: Text -> Text -> Text -> Text
+        substSuffix suffix replacement t = case T.stripSuffix suffix t of
+          Nothing -> t
+          Just t' -> t' `append` replacement
 evalExp (Call e1 e2) = do
   args <- T.lines . fromValue <$> evalExp e2
   withStateT (\st ->
@@ -143,4 +164,6 @@ main = print =<< (run $
   ,"xvalue" := Lit "pig"
   ,"z" := Var (Lit "x")
   ,SExp (Shell (Lit "echo " `Cat` Wildcard (Lit "*/*.cache")))
-  ,"y" := Shell (Lit "ls -1")])
+  ,"y" := Shell (Lit "ls -1")
+  ,"q" := Patsubst (Lit "%.c") (Lit "%.o") (Lit "a.c b.c c.c.c a.h")
+  ,"q'" := Varsubst (Lit "q") (Lit ".o") (Lit ".c")])
