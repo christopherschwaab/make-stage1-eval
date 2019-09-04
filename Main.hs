@@ -1,8 +1,12 @@
 {-#LANGUAGE OverloadedStrings, TypeOperators, ViewPatterns #-}
 module Main where
 
+import Prelude hiding (lex)
+
 import Control.Applicative
+import Control.Applicative.Combinators (between)
 import Control.Monad.State.Lazy
+import Data.Char (isSpace)
 import Data.List (sort)
 import Data.Map.Strict (Map)
 import Data.Maybe (isJust, isNothing)
@@ -16,9 +20,10 @@ import Data.Void (Void)
 import System.FilePath (dropExtensions, dropFileName, takeFileName)
 import System.FilePath.Glob (compileWith, compPosix, globDir1)
 import Text.Megaparsec
+import Text.Megaparsec.Char
 import TextShow
 
-type Parser = Parsec Text Void
+type Parser = Parsec Void Text
 
 type Name = Text
 
@@ -237,6 +242,55 @@ evalStmt (Ifneq e1 e2 s1 s2) = do Value v1 <- evalExp e1
 
 run :: Program -> IO EvalState
 run p = execStateT (mapM_ evalStmt p) (EvalState{env=Map.empty})
+
+newtype Recipe = Recipe Text
+  deriving Show
+data Rule = Rule Exp Exp Recipe
+  deriving Show
+data TopLevel = Stmt Stmt | RuleDecl Rule
+  deriving Show
+
+parens :: Parser a -> Parser a
+parens = between (char '(') (char ')')
+
+parseRExp :: Parser Exp
+parseRExp = undefined
+
+parseInnerExp :: Parser Exp
+parseInnerExp = undefined
+
+parseDollarExp :: Parser Exp
+parseDollarExp = char '$' *> (parens parseInnerExp
+                          <|> (Lit <$> takeP (Just "unbracketed variable name character") 1))
+
+parseWord :: Parser Text
+parseWord =  takeWhileP (Just "word") (not . isSpace)
+
+parseLExp :: Parser Exp
+parseLExp = parseDollarExp <|> Lit <$> parseWord
+
+parseRule :: Parser Rule
+parseRule = undefined
+
+parseBinding :: Exp -> Parser Stmt
+parseBinding e = lex (choice [BindDeferred e <$ chunk "="
+                             ,(e :=) <$ chunk ":="
+                             ,(e :!=) <$ chunk "!="
+                             ,(e :+=) <$ chunk "+="])
+             <*> parseRExp
+
+spaces :: Parser ()
+spaces = void (takeWhileP (Just "space") (== ' ')) -- other weird unicode spaces?
+
+lex :: Parser a -> Parser a
+lex p = p <* space
+
+parseStmt :: Parser Stmt
+parseStmt = optional tab *> space *> lex parseLExp >>= parseBinding
+
+parseTopLevel :: Parser TopLevel
+parseTopLevel = spaces *> (Stmt <$> parseStmt
+                       <|> RuleDecl <$> parseRule)
 
 main :: IO ()
 main = print =<< (run $

@@ -19,5 +19,6 @@ executable makeeval
                        text-show >=3.8.2,
                        Glob >=0.10.0,
                        filepath >=1.4.2.1,
+                       parser-combinators >=1.2.0,
   default-language:    Haskell2010
   extensions:          OverloadedStrings, TypeOperators, ViewPatterns
