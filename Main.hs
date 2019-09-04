@@ -1,14 +1,14 @@
 {-#LANGUAGE OverloadedStrings, TypeOperators, ViewPatterns #-}
 module Main where
 
-import Prelude hiding (lines, words)
-
 import Control.Applicative
 import Control.Monad.State.Lazy
 import Data.Map.Strict (Map)
-import Data.Traversable (sequence)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as Map
-import Data.Text (Text, append, intercalate, lines, pack, replace, uncons, unpack, words)
+import Data.Text (Text, append, intercalate, pack, uncons, unpack)
+import qualified Data.Text as T
+import Data.Traversable (sequence)
 import qualified Shelly as Sh
 import Data.Void (Void)
 import System.FilePath.Glob (compileWith, compPosix, globDir1)
@@ -51,28 +51,34 @@ data EvalState = EvalState
 type Interpreter = StateT EvalState IO
 
 splitFields :: Text -> [Text]
-splitFields = words
+splitFields = T.words
 
-wild :: Bool -> Bool -> Text -> Text -> (Char -> Text -> Bool) -> Bool
-wild wildMatchesEmpty True (uncons -> Just ('%', pat')) (uncons -> Just (y, t')) backtrack =
-  longestMatch (uncons pat') y t'
-  where longestMatch (Just (x,   pat''))   y t' = anyTill x pat'' (Just (y, t'))
-        longestMatch Nothing               _ _  = True
-        anyTill x pat'' (Just (y, t'))
-          | x == y    = wild wildMatchesEmpty False pat'' t' (longestMatch (Just (x, pat'')))
-          | otherwise = anyTill x pat'' (uncons t')
-        anyTill x pat'' Nothing = False
-wild wildMatchesEmpty matchWild (uncons -> Just ('%', _)) (uncons -> Nothing) backtrack =
-  wildMatchesEmpty
-wild wildMatchesEmpty matchWild (uncons -> Just (x, pat')) (uncons -> Just (y, t')) backtrack
-  | x == y    = wild wildMatchesEmpty matchWild pat' t' backtrack
-  | otherwise = backtrack y t'
-wild wildMatchesEmpty matchWild (uncons -> Nothing)     (uncons -> Just (y, t'))  backtrack = backtrack y t'
-wild wildMatchesEmpty matchWild (uncons -> Just (x, _)) (uncons -> Nothing) backtrack = False
-wild wildMatchesEmpty matchWild (uncons -> Nothing)     (uncons -> Nothing) backtrack = True
+data SubText = SubText { offset :: Int, subtext :: Text }
+subtextUncons :: SubText -> Maybe (Char, SubText)
+subtextUncons (SubText i t) = fmap (\(x, t') -> (x, SubText (i+1) t')) (uncons t)
 
-wildcard :: Text -> Text -> Bool
-wildcard pat t = wild True True pat t (\_ _ -> False)
+matchExact :: (SubText -> Maybe Text) -> Text -> Text -> SubText -> Maybe Text
+matchExact backtrack matched pat t = case (uncons pat, subtextUncons t) of
+  (Just (x, pat'), Just (y, t')) -> if x == y then matchExact backtrack matched pat' t'
+                                      else backtrack t
+  (Nothing, Just _) -> backtrack t
+  (Nothing, Nothing) -> Just matched
+  (Just _, Nothing) -> Nothing
+
+matchWild :: Text -> Char -> Text -> SubText -> Maybe Text
+matchWild matched x pat t = do
+  (y, t') <- subtextUncons t
+  if x == y
+    then matchExact (matchWild matched x pat) (T.take (offset t) matched) pat t'
+    else matchWild matched x pat t'
+
+matchPat :: Text -> Text -> Maybe Text
+matchPat pat = case uncons pat of
+  Just ('%', pat') -> \t -> maybe (Just t) (\(x, pat'') -> matchWild t x pat'' (SubText 0 t)) (uncons pat')
+  Just (x, pat') -> \t -> do (y, t') <- uncons t
+                             guard (x == y)
+                             matchPat pat' t'
+  Nothing -> \t -> if T.null t then Just "" else Nothing
 
 -- FIXME Whitespace preservation/collapse is surely wrong
 evalExp :: Exp -> Interpreter Value
@@ -85,13 +91,13 @@ evalExp (Foreach e1 e2 e3) = do
   return (Value (intercalate " " (map fromValue ws')))
 evalExp (Filter e1 e2) = do pat <- fromValue <$> evalExp e1
                             ws <- splitFields . fromValue <$> evalExp e2
-                            let ws' = filter (wildcard pat) ws
+                            let ws' = filter (isJust . matchPat pat) ws
                             return (Value (intercalate " " ws'))
 evalExp (Shell e) = do Value t <- evalExp e
                        (exitStatus, out) <- lift (Sh.shelly . Sh.silently $ do
                          out <- Sh.run "/bin/sh" ["-c", t]
                          exitStatus <- Sh.lastExitCode
-                         return (Value (showt exitStatus), replace "\n" " " out))
+                         return (Value (showt exitStatus), T.replace "\n" " " out))
                        modify (\st -> EvalState{env=Map.insert ".SHELLOUT" exitStatus (env st)})
                        return (Value out)
 evalExp (Lit t) = return (Value t)
@@ -106,11 +112,11 @@ evalExp (Wildcard e) = do Value pattern <- evalExp e
                           lift (spaceSeparate . map pack <$> globInCwd (unpack pattern))
   where spaceSeparate = Value . intercalate " "
         globInCwd p = globDir1 (compileWith compPosix p) ""
-evalExp (Varsubst x e1 e2) = Value <$> (replace <$> (fromValue <$> evalExp e1)
-                                                <*> (fromValue <$> evalExp e2)
-                                                <*> undefined) -- lookup x in env
+evalExp (Varsubst x e1 e2) = Value <$> (T.replace <$> (fromValue <$> evalExp e1)
+                                                  <*> (fromValue <$> evalExp e2)
+                                                  <*> undefined) -- lookup x in env
 evalExp (Call e1 e2) = do
-  args <- lines . fromValue <$> evalExp e2
+  args <- T.lines . fromValue <$> evalExp e2
   withStateT (\st ->
     EvalState{env=foldr (\(n, arg) p -> Map.insert (showt n) (Value arg) p)
                         (env st)
