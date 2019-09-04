@@ -107,13 +107,13 @@ evalExp (Foreach e1 e2 e3) = do
                                 (evalExp e2))
               ws
   return (Value (intercalate " " (map fromValue ws')))
-evalExp (Filter e1 e2) = do pat <- fromValue <$> evalExp e1
+evalExp (Filter e1 e2) = do pats <- splitFields . fromValue <$> evalExp e1
                             ws <- splitFields . fromValue <$> evalExp e2
-                            let ws' = filter (isJust . matchPat pat) ws
+                            let ws' = filter (\w -> any isJust (map (\p -> matchPat p w) pats)) ws
                             return (Value (intercalate " " ws'))
-evalExp (FilterOut e1 e2) = do pat <- fromValue <$> evalExp e1
+evalExp (FilterOut e1 e2) = do pat <- splitFields . fromValue <$> evalExp e1
                                ws <- splitFields . fromValue <$> evalExp e2
-                               let ws' = filter (isNothing . matchPat pat) ws
+                               let ws' = filter (\w -> any isNothing (map (\p -> matchPat p w) pat)) ws
                                return (Value (intercalate " " ws'))
 evalExp (If e1 e2 e3) = do Value p <- evalExp e1
                            if T.null p then evalExp e2
