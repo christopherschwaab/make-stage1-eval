@@ -253,15 +253,21 @@ data TopLevel = Stmt Stmt | RuleDecl Rule
 parens :: Parser a -> Parser a
 parens = between (char '(') (char ')')
 
+braces :: Parser a -> Parser a
+braces = between (char '{') (char '}')
+
 parseRExp :: Parser Exp
 parseRExp = undefined
 
-parseInnerExp :: Parser Exp
-parseInnerExp = undefined
+parseExp :: Parser Exp
+parseExp = undefined
 
 parseDollarExp :: Parser Exp
-parseDollarExp = char '$' *> (parens parseInnerExp
-                          <|> (Lit <$> takeP (Just "unbracketed variable name character") 1))
+parseDollarExp = char '$' *> (dollarLit <|> expr) where
+  dollarLit = Lit . T.singleton <$> char '$'
+  expr = parens parseExp
+     <|> braces parseExp
+     <|> Lit <$> takeP (Just "unbracketed variable name character") 1
 
 parseWord :: Parser Text
 parseWord =  takeWhileP (Just "word") (not . isSpace)
