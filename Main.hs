@@ -36,7 +36,7 @@ data Exp
   | Shell Exp -- Collapses whitespace
   | Lit Text
   | Var Exp
-  | Cat Exp Exp
+  | Exp `Cat` Exp
   | Wildcard Exp
   | Patsubst Exp Exp Exp -- Collapses whitespace?
   | Varsubst Exp Exp Exp -- Collapses whitespace
@@ -54,6 +54,9 @@ data Exp
   -- | AddSuffix Exp Exp
   -- | Abspath Exp Exp
   -- | Eval FIXME
+  deriving Show
+
+data Binder = DeferredBinder | ImmediateBinder | DefaultValueBinder | ShellBinder | AppendBinder
   deriving Show
 
 data Stmt
@@ -223,7 +226,7 @@ evalStmt (e1 :+= e2) = do
           Just (Immediate (Value v')) -> do
             Value v <- evalExp e2
             return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
-          Just (Deferred e') -> return (Map.insert x (Deferred (e' `Cat` Lit " " `Cat` e2)) p)
+          Just (Deferred e') -> return (Map.insert x (Deferred (e' `cat` Lit " " `cat` e2)) p)
           Nothing -> undefined -- what does make do in this case?
   put (EvalState{env=p'})
 evalStmt (e1 :!= e2) = do Value x <- evalExp e1
@@ -259,34 +262,87 @@ braces = between (char '{') (char '}')
 parseRExp :: Parser Exp
 parseRExp = undefined
 
-parseExp :: Parser Exp
-parseExp = undefined
+parseExp :: Char -> Parser Exp
+parseExp closer = do
+  l <- takeWhileP (Just "expression (non-'$') character") (not . flip elem ['$', '\n', closer])
+  choice [char '$' *> (catl l <$> parseDollarExp)
+         ,char '\n' *> expLineEnd l
+         ,Lit l<$ lookAhead (char closer)]
+  where expLineEnd l = if T.last l == '\\'
+                         then catl (l `append` " ") <$> parseExp closer
+                         else pure (Lit l)
 
 parseDollarExp :: Parser Exp
-parseDollarExp = char '$' *> (dollarLit <|> expr) where
+parseDollarExp = dollarLit <|> (Var <$> expr) where
   dollarLit = Lit . T.singleton <$> char '$'
-  expr = parens parseExp
-     <|> braces parseExp
-     <|> Lit <$> takeP (Just "unbracketed variable name character") 1
+  expr = parens (parseExp ')')
+     <|> braces (parseExp '}')
+     <|> Lit <$> takeP (Just "unbracketed identifier character") 1
 
 parseWord :: Parser Text
 parseWord =  takeWhileP (Just "word") (not . isSpace)
 
+cat :: Exp -> Exp -> Exp
+cat (Lit t1) (Lit t2) = Lit (t1 `append` t2)
+cat e1 e2 = e1 `Cat` e2
+
+catr :: Exp -> Text -> Exp
+catr (Lit t1) t2 = Lit (t1 `append` t2)
+catr e t = e `Cat` Lit t
+
+catl :: Text -> Exp -> Exp
+catl t1 (Lit t2) = Lit (t1 `append` t2)
+catl t e = Lit t `Cat` e
+
+lineContinuation :: Parser ()
+lineContinuation = void (char '\\' >> eol) -- Is this even correct? What does make consider a line end?
+
+expectLineContinuation :: Char -> Parser ()
+expectLineContinuation '\n' = pure ()
+expectLineContinuation _ = fail "Newlines in rule identifiers must be escaped by a backslash \\."
+
+data LWord = LRuleOrVarDecl Exp | LVarDecl Exp Binder | LRuleDecl Exp
+  deriving Show
+
+-- This seems to basically accept anything (including strange unicode space
+-- chars) except ascii space, newline, tab, and carriage return.
+parseLWord :: Exp -> Parser LWord
+parseLWord prefix =  do
+  leading <- takeWhileP (Just "identifier character") (not . flip elem stopChars)
+  -- FIXME Tidy mess and fail on empty identifiers.
+  choice [oneOf sepChars *> pure (LRuleOrVarDecl (prefix `catr` leading))
+         ,char '\n' *> expectLineContinuation (T.last leading) *> parseLWord (prefix `catr` (leading `append` " "))
+         ,char '=' *> pure (charToBinder leading)
+         ,char ':' *> ((LVarDecl (prefix `catr` leading) ImmediateBinder <$ char '=') <|> pure (LRuleDecl prefix))
+         ,char '$' *> parseDollarExp >>= \e -> parseLWord (prefix `catr` leading `cat` e)]
+  where sepChars = [' ', '\t']
+        stopChars = sepChars ++ ['\n', '=', ':', '$']
+        charToBinder l = Map.findWithDefault
+                           (LVarDecl (prefix `catr` l) DeferredBinder)
+                           (T.last l)
+                           (Map.fromList [('?', LVarDecl (prefix `catr` T.init l) DefaultValueBinder)
+                                         ,('!', LVarDecl (prefix `catr` T.init l) ShellBinder)
+                                         ,('+', LVarDecl (prefix `catr` T.init l) AppendBinder)])
+{-# INLINE parseLWord #-}
+
 parseLExp :: Parser Exp
-parseLExp = parseDollarExp <|> Lit <$> parseWord
+parseLExp = (lwordCont =<< parseLWord (Lit ""))
+  where lwordCont :: LWord -> Parser Exp
+        lwordCont = undefined
 
 parseRule :: Parser Rule
 parseRule = undefined
 
 parseBinding :: Exp -> Parser Stmt
-parseBinding e = lex (choice [BindDeferred e <$ chunk "="
-                             ,(e :=) <$ chunk ":="
-                             ,(e :!=) <$ chunk "!="
-                             ,(e :+=) <$ chunk "+="])
-             <*> parseRExp
+parseBinding e = lex binder <*> pure e <*> parseRExp
+  where binder :: Parser (Exp -> Exp -> Stmt)
+        binder = choice [char '='   *> pure BindDeferred
+                        ,chunk ":=" *> pure (:=)
+                        ,chunk "!=" *> pure (:!=)
+                        ,chunk "+=" *> pure (:+=)]
 
 spaces :: Parser ()
-spaces = void (takeWhileP (Just "space") (== ' ')) -- other weird unicode spaces?
+spaces = void (takeWhileP (Just "space") (== ' '))
 
 lex :: Parser a -> Parser a
 lex p = p <* space
