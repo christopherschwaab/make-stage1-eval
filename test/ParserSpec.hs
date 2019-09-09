@@ -26,3 +26,12 @@ spec = do
     it "differentiates unambiguous rule and variable declarations" $ do
       parse (parseLWord (Lit "")) "" "xvar:=" `shouldParse` LVarDecl (Lit("xvar")) ImmediateBinder
       parse (parseLWord (Lit "")) "" "xrule:" `shouldParse` LRuleDecl (Lit("xrule"))
+
+    it "supports unusual characters in rule names" $ do
+      parse (parseLWord (Lit "")) "" "!rule:" `shouldParse` LRuleDecl (Lit ("!rule"))
+      parse (parseLWord (Lit "")) "" "a?!rule.:" `shouldParse` LRuleDecl (Lit("a?!rule."))
+
+    it "supports backslashes in names" $ do
+      parse (parseLWord (Lit "")) "" "\\xvar:=" `shouldParse` LVarDecl (Lit("\\xvar")) ImmediateBinder
+      parse (parseLWord (Lit "")) "" "a\\decl?=" `shouldParse` LVarDecl (Lit("a\\decl")) DefaultValueBinder
+      parse (parseLWord (Lit "")) "" "xrule\\:" `shouldParse` LRuleDecl (Lit("xrule\\"))
