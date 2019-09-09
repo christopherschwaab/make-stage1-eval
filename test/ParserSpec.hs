@@ -10,6 +10,8 @@ import Text.Megaparsec
 import Parser
 import Syntax
 
+import Gen
+
 spec :: Spec
 spec = do
   describe "parseLWord" $ do
