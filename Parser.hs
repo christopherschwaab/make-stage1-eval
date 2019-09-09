@@ -259,7 +259,7 @@ parseLWord prefix =  do
   choice [oneOf sepChars *> pure (LRuleOrVarDecl (prefix `catr` leading))
          ,char '\n' *> expectLineContinuation (T.last leading) *> parseLWord (prefix `catr` (leading `append` " "))
          ,char '=' *> pure (charToBinder leading)
-         ,char ':' *> ((LVarDecl (prefix `catr` leading) ImmediateBinder <$ char '=') <|> pure (LRuleDecl prefix))
+         ,char ':' *> ((LVarDecl (prefix `catr` leading) ImmediateBinder <$ char '=') <|> pure (LRuleDecl (prefix `catr` leading)))
          ,char '$' *> parseDollarExp >>= \e -> parseLWord (prefix `catr` leading `cat` e)]
   where sepChars = [' ', '\t']
         stopChars = sepChars ++ ['\n', '=', ':', '$']
