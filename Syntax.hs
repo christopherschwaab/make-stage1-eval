@@ -3,6 +3,7 @@ module Syntax where
 
 import Data.Map (Map)
 import Data.Text (Text)
+import Unsafe.Coerce (unsafeCoerce)
 
 type Name = Text
 
@@ -35,28 +36,42 @@ data PAppliedBuiltin where
   PApp :: AppliedBuiltin sh -> PAppliedBuiltin
 
 instance Eq PAppliedBuiltin where
-  PApp x == PApp y = undefined
+  PApp (App Foreach   x) == PApp (App Foreach   y) = x == y
+  PApp (App Filter    x) == PApp (App Filter    y) = x == y
+  PApp (App FilterOut x) == PApp (App FilterOut y) = x == y
+  PApp (App If        x) == PApp (App If        y) = x == y
+  PApp (App And       x) == PApp (App And       y) = x == y
+  PApp (App Shell     x) == PApp (App Shell     y) = x == y
+  PApp (App Wildcard  x) == PApp (App Wildcard  y) = x == y
+  PApp (App Patsubst  x) == PApp (App Patsubst  y) = x == y
+  PApp (App Call      x) == PApp (App Call      y) = x == y
+  PApp (App Error     x) == PApp (App Error     y) = x == y
+  PApp (App Sort      x) == PApp (App Sort      y) = x == y
+  PApp (App Subst     x) == PApp (App Subst     y) = x == y
+  PApp (App Word      x) == PApp (App Word      y) = x == y
+  PApp (App Firstword x) == PApp (App Firstword y) = x == y
+  PApp (App Dir       x) == PApp (App Dir       y) = x == y
+  PApp (App Notdir    x) == PApp (App Notdir    y) = x == y
+  PApp (App Basename  x) == PApp (App Basename  y) = x == y
+  _ == _ = False
 instance Show PAppliedBuiltin where
-  show (PApp x) = undefined
-
---  = Foreach Exp Exp Exp -- Collapses whitespace
---  | Filter Exp Exp -- collapses whitespace?
---  | FilterOut Exp Exp -- collapses whitespace?
---  | If Exp Exp Exp -- collapses whitespace?
---  | And [Exp] -- collapses whitespace?
---  | Shell Exp -- Collapses whitespace
---  | Wildcard Exp
---  | Patsubst Exp Exp Exp -- Collapses whitespace?
---  | Call Exp [Exp] -- Collapses whitespace
---  | Error Exp
---  | Sort Exp
---  | Subst Exp Exp Exp
---  | Word Exp Exp
---  | Firstword Exp
---  | Dir Exp
---  | Notdir Exp
---  | Basename Exp
---  deriving (Eq, Show)
+  show (PApp a@(App Foreach   x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Filter    x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App FilterOut x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App If        x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App And       x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Shell     x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Wildcard  x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Patsubst  x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Call      x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Error     x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Sort      x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Subst     x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Word      x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Firstword x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Dir       x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Notdir    x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Basename  x)) = "(PApp (" ++ show a ++ "))"
 
 data Exp
   = Lit Text

@@ -233,67 +233,65 @@ parens = between (char '(') (char ')')
 braces :: Parser a -> Parser a
 braces = between (char '{') (char '}')
 
-innerLitExp :: Maybe Char -> Parser Text
-innerLitExp closeBracket = do
-  let nonLitChar = ['\\', '$', '\n', '#'] ++ maybe [] return closeBracket
+innerLitExp :: [Char] -> Parser Text
+innerLitExp tchars = do
+  let nonLitChar = ['\\', '$', '\n', '#'] ++ tchars
   l <- takeWhileP (Just "right-hand literal character") (\c -> not (c `elem` nonLitChar))
-  choice [append l . append " " <$> (lineContinuation *> innerLitExp closeBracket)
-         ,append "$" <$> (chunk "$$" *> innerLitExp closeBracket)
-         ,append <$> (char '\\' *> option "\\" escaped) <*> innerLitExp closeBracket
-         ,pure l]
+  choice [append l . append " " <$> (lineContinuation *> innerLitExp tchars)
+         ,append "$" <$> (chunk "$$" *> innerLitExp tchars)
+         ,append <$> (char '\\' *> option "\\" escaped) <*> innerLitExp tchars
+         ,guard (not (T.null l)) >> pure l]
   where escaped = choice [chunk "$ " *> pure ""
                          ,char '#'   *> pure "#"
                          ,char '\\'  *> pure "\\"
                          ,char '\n'  *> pure " "]
 
 class ParseBuiltinArgs sh where
-  parseBuiltinArgs :: Parser sh
+  parseBuiltinArgs :: [Char] -> Parser sh
 instance ParseBuiltinArgs [Exp] where
-  parseBuiltinArgs = expVarArgs
+  parseBuiltinArgs tchars = expVarArgs tchars
 instance ParseBuiltinArgs Exp where
-  parseBuiltinArgs = expArgs 1 >>= \[x] -> return x
+  parseBuiltinArgs tchars = expArgs tchars 1 >>= \[x] -> return x
 instance ParseBuiltinArgs (Exp, Exp) where
-  parseBuiltinArgs = expArgs 2 >>= \[x,y] -> return (x, y)
+  parseBuiltinArgs tchars = expArgs tchars 2 >>= \[x,y] -> return (x, y)
 instance ParseBuiltinArgs (Exp, Exp, Exp) where
-  parseBuiltinArgs = expArgs 3 >>= \[x,y,z] -> return (x, y, z)
+  parseBuiltinArgs tchars = expArgs tchars 3 >>= \[x,y,z] -> return (x, y, z)
 
-builtin :: Parser PAppliedBuiltin
-builtin = choice builtins where
-  reserved x = undefined
-  builtins = [reserved "foreach" >> PApp . App Foreach <$> parseBuiltinArgs
-             ,reserved "filter" >> PApp . App Filter <$> parseBuiltinArgs
-             ,reserved "filter-out" >> PApp . App FilterOut <$> parseBuiltinArgs
-             ,reserved "if" >> PApp . App If <$> parseBuiltinArgs
-             ,reserved "and" >> PApp . App And <$> parseBuiltinArgs
-             ,reserved "shell" >> PApp . App Shell <$> parseBuiltinArgs
-             ,reserved "wildcard" >> PApp . App Wildcard <$> parseBuiltinArgs
-             ,reserved "patsubst" >> PApp . App Patsubst <$> parseBuiltinArgs
-             ,reserved "call" >> PApp . App Call <$> parseBuiltinArgs
-             ,reserved "error" >> PApp . App Error <$> parseBuiltinArgs
-             ,reserved "sort" >> PApp . App Sort <$> parseBuiltinArgs
-             ,reserved "subst" >> PApp . App Subst <$> parseBuiltinArgs
-             ,reserved "word" >> PApp . App Word <$> parseBuiltinArgs
-             ,reserved "firstword" >> PApp . App Firstword <$> parseBuiltinArgs
-             ,reserved "dir" >> PApp . App Dir <$> parseBuiltinArgs
-             ,reserved "notdir" >> PApp . App Notdir <$> parseBuiltinArgs
-             ,reserved "basename" >> PApp . App Basename <$> parseBuiltinArgs]
+builtin :: [Char] -> Parser PAppliedBuiltin
+builtin tchars = choice builtins where
+  -- FIXME does reserved eat all following whitespace or just the first?
+  reserved x = try (chunk x >> choice [void lineContinuation, void (char ' '), void (char '\t')] )
+  builtins = [reserved "foreach" >> PApp . App Foreach <$> parseBuiltinArgs tchars
+             ,reserved "filter" >> PApp . App Filter <$> parseBuiltinArgs tchars
+             ,reserved "filter-out" >> PApp . App FilterOut <$> parseBuiltinArgs tchars
+             ,reserved "if" >> PApp . App If <$> parseBuiltinArgs tchars
+             ,reserved "and" >> PApp . App And <$> parseBuiltinArgs tchars
+             ,reserved "shell" >> PApp . App Shell <$> parseBuiltinArgs tchars
+             ,reserved "wildcard" >> PApp . App Wildcard <$> parseBuiltinArgs tchars
+             ,reserved "patsubst" >> PApp . App Patsubst <$> parseBuiltinArgs tchars
+             ,reserved "call" >> PApp . App Call <$> parseBuiltinArgs tchars
+             ,reserved "error" >> PApp . App Error <$> parseBuiltinArgs tchars
+             ,reserved "sort" >> PApp . App Sort <$> parseBuiltinArgs tchars
+             ,reserved "subst" >> PApp . App Subst <$> parseBuiltinArgs tchars
+             ,reserved "word" >> PApp . App Word <$> parseBuiltinArgs tchars
+             ,reserved "firstword" >> PApp . App Firstword <$> parseBuiltinArgs tchars
+             ,reserved "dir" >> PApp . App Dir <$> parseBuiltinArgs tchars
+             ,reserved "notdir" >> PApp . App Notdir <$> parseBuiltinArgs tchars
+             ,reserved "basename" >> PApp . App Basename <$> parseBuiltinArgs tchars]
 
-appliedBuiltin :: Parser PAppliedBuiltin
-appliedBuiltin = undefined
-
-innerExp :: Maybe Char -> Parser Exp
-innerExp closeBracket = foldr1 cat <$> some exp where
-  exp = choice [Builtin <$> appliedBuiltin
-               ,Lit <$> innerLitExp closeBracket
+innerExp :: [Char] -> Parser Exp
+innerExp tchars = foldr1 cat <$> some exp where
+  exp = choice [Builtin <$> builtin tchars
+               ,Lit <$> innerLitExp tchars
                ,Var <$> (char '$' *> dollarExp)]
 
 dollarExp :: Parser Exp
-dollarExp = choice [parens (innerExp (Just ')'))
-                   ,braces (innerExp (Just '}'))
+dollarExp = choice [parens (innerExp [')'])
+                   ,braces (innerExp ['}'])
                    ,Lit <$> (option " " (T.singleton <$> anySingleBut '\n'))]
 
 rexp :: Parser Exp
-rexp = innerExp Nothing
+rexp = innerExp []
 
 lineContinuation :: Parser Text
 lineContinuation = " " <$ (char '\\' >> eol) -- Is this even correct? What does make consider a line end?
@@ -335,16 +333,16 @@ parseLWord :: Parser LWord
 parseLWord = lword (Lit "")
 {-# INLINE parseLWord #-}
 
-expArgs :: Natural -> Parser [Exp]
-expArgs 0 = pure []
-expArgs 1 = return <$> innerExp Nothing
-expArgs n = (:) <$> innerExp (Just ',') <*> args (pred n) where
+expArgs :: [Char] -> Natural -> Parser [Exp]
+expArgs tchars 0 = pure []
+expArgs tchars 1 = return <$> innerExp tchars
+expArgs tchars n = (:) <$> innerExp (',':tchars) <*> args (pred n) where
   args :: Natural -> Parser [Exp]
-  args 1 = return <$> innerExp Nothing
-  args n = (:) <$> (char ',' *> innerExp (Just ',')) <*> args (pred n)
+  args 1 = return <$> innerExp tchars
+  args n = (:) <$> (char ',' *> innerExp (',':tchars)) <*> args (pred n)
 
-expVarArgs :: Parser [Exp]
-expVarArgs = innerExp (Just ',') `sepBy` char ','
+expVarArgs :: [Char] -> Parser [Exp]
+expVarArgs tchars = innerExp (',':tchars) `sepBy` char ','
 
 collapseContLines :: (a -> a -> a) -> Parser a -> Parser a
 collapseContLines f p = foldr1 f <$> ((:) <$> p <*> many (lineContinuation *> p))
