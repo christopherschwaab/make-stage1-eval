@@ -6,11 +6,31 @@ import Test.Hspec.Megaparsec
 import Data.Text (Text)
 import Data.Void (Void)
 import Text.Megaparsec
+import Text.RawString.QQ
 
 import Parser
 import Syntax
 
 import Gen
+
+simpleRecipe = [r|	echo calling all|]
+emptyLinesRecipe = [r|
+	
+
+#
+	    
+#####
+	
+|]
+mostlyEmptyLinesRecipe = [r|
+	
+
+#
+	    
+	echo single command between empty lines
+#####
+	
+|]
 
 spec :: Spec
 spec = do
@@ -42,6 +62,13 @@ spec = do
       parse parseLWord "" "xrule\\  :" `shouldParse` LRuleOrVarDecl (Lit "xrule\\")
       parse parseLWord "" "xvar\\  :=" `shouldParse` LRuleOrVarDecl (Lit "xvar\\")
 
-  -- describe "parseTopLevel" $ do
-  --   it "discriminates ambiguous lwords"
-  --     parse parseTopLevel "" "xrule\\  :" `shouldParse` RuleDecl (Rule "xrule\\")
+  describe "parseRecipe" $ do
+    it "matches simple rules" $ do
+      parse parseRecipe "" simpleRecipe `shouldParse` Recipe [Lit "echo calling all"]
+
+    it "accepts an empty rule of whitespace" $ do
+      runParser' parseRecipe (initialState emptyLinesRecipe) `succeedsLeaving` ""
+
+    it "accepts a non-empty line between empty lines" $ do
+      runParser' parseRecipe (initialState mostlyEmptyLinesRecipe ) `succeedsLeaving` ""
+      parse parseRecipe "" mostlyEmptyLinesRecipe `shouldParse` Recipe [Lit "echo single command between empty lines"]

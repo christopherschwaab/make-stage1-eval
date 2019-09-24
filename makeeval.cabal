@@ -20,7 +20,7 @@ library
                        filepath >=1.4.2.1,
                        parser-combinators >=1.2.0,
   default-language:    Haskell2010
-  default-extensions:  OverloadedStrings, TypeOperators, ViewPatterns
+  default-extensions:  OverloadedStrings, TypeOperators
   exposed-modules:     Parser, Syntax
 
 executable makeeval
@@ -38,7 +38,7 @@ executable makeeval
                        filepath >=1.4.2.1,
                        parser-combinators >=1.2.0,
   other-modules:       Parser, Syntax
-  default-extensions:  OverloadedStrings, TypeOperators, ViewPatterns
+  default-extensions:  OverloadedStrings, TypeOperators
   default-language:    Haskell2010
 
 test-suite spec
@@ -56,8 +56,9 @@ test-suite spec
     bytestring >=0.10.8.2,
     QuickCheck >=2.13.2,
     quickcheck-text >=0.1.2.1,
+    raw-strings-qq >=1.1,
     makeeval
   other-modules: ParserSpec, Gen
   build-tool-depends: hspec-discover:hspec-discover >=2.7.1
   default-language:   Haskell2010
-  default-extensions: OverloadedStrings, TypeOperators, ViewPatterns
+  default-extensions: OverloadedStrings, TypeOperators, QuasiQuotes

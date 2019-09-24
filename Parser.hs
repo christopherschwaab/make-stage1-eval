@@ -10,8 +10,9 @@ import Control.Applicative.Combinators (between)
 import Control.Monad.State.Lazy
 import Data.Char (isSpace)
 import Data.List (sort)
+import Data.List.NonEmpty (NonEmpty, NonEmpty(..), toList)
 import Data.Map.Strict (Map)
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (catMaybes, isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, append, intercalate, pack, uncons, unpack)
 import qualified Data.Text as T
@@ -24,6 +25,7 @@ import System.FilePath (dropExtensions, dropFileName, takeFileName)
 import System.FilePath.Glob (compileWith, compPosix, globDir1)
 import Text.Megaparsec
 import Text.Megaparsec.Char
+import Text.Megaparsec.Char.Lexer (skipLineComment)
 import TextShow
 
 type Parser = Parsec Void Text
@@ -99,7 +101,7 @@ evalBuiltin :: Builtin sh -> sh -> Interpreter Value
 evalBuiltin Foreach (e1, e2, e3) = do
   Value x <- evalExp e1
   ws <- splitFields . fromValue <$> evalExp e3
-  ws' <- mapM (\w -> withStateT (\st -> EvalState{env=Map.insert x (Immediate (Value w)) (env st)})
+  ws' <- mapM (\w -> withStateT (\st -> st{env=Map.insert x (Immediate (Value w)) (env st)})
                                 (evalExp e2))
               ws
   return (Value (intercalate " " (map fromValue ws')))
@@ -127,7 +129,7 @@ evalBuiltin Shell e = do
     out <- Sh.run "/bin/sh" ["-c", t]
     exitStatus <- Sh.lastExitCode
     return (Value (showt exitStatus), T.replace "\n" " " out))
-  modify (\st -> EvalState{env=Map.insert ".SHELLOUT" (Immediate exitStatus) (env st)})
+  modify (\st -> st{env=Map.insert ".SHELLOUT" (Immediate exitStatus) (env st)})
   return (Value out)
 evalBuiltin Patsubst (e1, e2, e3) = do
   Value pat <- evalExp e1
@@ -145,9 +147,9 @@ evalBuiltin Call (e:es) = do
   -- assignment can overwrite argument values.
   args <- map fromValue <$> mapM evalExp es
   withStateT (\st ->
-    EvalState{env=foldr (\(n, arg) p -> Map.insert (showt n) (Immediate (Value arg)) p)
-                        (env st)
-                        (zip [(1::Int)..] args)})
+    st{env=foldr (\(n, arg) p -> Map.insert (showt n) (Immediate (Value arg)) p)
+                 (env st)
+                 (zip [(1::Int)..] args)})
     (evalExp e)
 evalBuiltin Error e = error . unpack . fromValue <$> evalExp e
 evalBuiltin Sort e = Value . intercalate " " . sort . splitFields . fromValue <$> evalExp e
@@ -172,27 +174,29 @@ evalStmt :: Stmt -> Interpreter ()
 evalStmt (Bind b e1 e2) = do
   Value x <- evalExp e1
   case b of
-    DeferredBinder -> modify (\st -> EvalState {env=Map.insert x (Deferred e2) (env st)})
+    DeferredBinder -> modify (\st -> st{env=Map.insert x (Deferred e2) (env st)})
     ImmediateBinder -> do v <- evalExp e2
-                          modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
+                          modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
     DefaultValueBinder -> do
-      p <- env <$> get
+      st <- get
+      let p = env st
       p' <- case Map.lookup x p of
         Just _ -> return p
         Nothing -> do v <- evalBuiltin Shell e2
                       return (Map.insert x (Immediate v) p) -- is this immediate or deferred?
-      put (EvalState{env=p'})
+      put (st{env=p'})
     ShellBinder -> do v <- evalBuiltin Shell e2
-                      modify (\st -> EvalState {env=Map.insert x (Immediate v) (env st)})
+                      modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
     AppendBinder -> do
-      p <- env <$> get
+      st <- get
+      let p = env st
       p' <- case Map.lookup x p of
         Just (Immediate (Value v')) -> do
           Value v <- evalExp e2
           return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
         Just (Deferred e') -> return (Map.insert x (Deferred (e' `cat` Lit " " `cat` e2)) p)
         Nothing -> undefined -- what does make do in this case?
-      put (EvalState{env=p'})
+      put (st{env=p'})
 evalStmt (SExp e) = () <$ evalExp e
 evalStmt Skip = return ()
 evalStmt (Ifeq e1 e2 s1 s2) = do Value v1 <- evalExp e1
@@ -204,8 +208,19 @@ evalStmt (Ifneq e1 e2 s1 s2) = do Value v1 <- evalExp e1
                                   if v1 /= v2 then evalStmt s1
                                     else evalStmt s2
 
+-- FIXME double check the order things get evaluated here
+evalRule :: Rule -> Interpreter ()
+evalRule (Rule t d (Recipe es)) = do
+  Value target <- evalExp t
+  deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
+  modify (\st -> st{targets = Map.insert target (deps, es) (targets st)}) -- FIXME think make dies on  double defined targets? (except ::)
+
+evalTopLevel :: TopLevel -> Interpreter ()
+evalTopLevel (Stmt s) = evalStmt s
+evalTopLevel (RuleDecl r) = evalRule r
+
 run :: Program -> IO EvalState
-run p = execStateT (mapM_ evalStmt p) (EvalState{env=Map.empty})
+run p = execStateT (mapM_ evalTopLevel p) (EvalState{env=Map.empty, targets=Map.empty})
 
 cat :: Exp -> Exp -> Exp
 cat (Lit t1) (Lit t2)
@@ -233,18 +248,18 @@ parens = between (char '(') (char ')')
 braces :: Parser a -> Parser a
 braces = between (char '{') (char '}')
 
-innerLitExp :: [Char] -> Parser Text
-innerLitExp tchars = do
+innerLitExp :: Text -> [Char] -> Parser Text
+innerLitExp nl tchars = do
   let nonLitChar = ['\\', '$', '\n', '#'] ++ tchars
   l <- takeWhileP (Just "right-hand literal character") (\c -> not (c `elem` nonLitChar))
-  choice [append l . append " " <$> (lineContinuation *> innerLitExp tchars)
-         ,append "$" <$> (chunk "$$" *> innerLitExp tchars)
-         ,append <$> (char '\\' *> option "\\" escaped) <*> innerLitExp tchars
+  choice [append l . append " " <$> (lineContinuation *> innerLitExp nl tchars)
+         ,append "$" <$> (chunk "$$" *> innerLitExp nl tchars)
+         ,append <$> (char '\\' *> option "\\" escaped) <*> innerLitExp nl tchars
          ,guard (not (T.null l)) >> pure l]
   where escaped = choice [chunk "$ " *> pure ""
                          ,char '#'   *> pure "#"
                          ,char '\\'  *> pure "\\"
-                         ,char '\n'  *> pure " "]
+                         ,char '\n'  *> pure nl]
 
 class ParseBuiltinArgs sh where
   parseBuiltinArgs :: [Char] -> Parser sh
@@ -279,19 +294,22 @@ builtin tchars = choice builtins where
              ,reserved "notdir" >> PApp . App Notdir <$> parseBuiltinArgs tchars
              ,reserved "basename" >> PApp . App Basename <$> parseBuiltinArgs tchars]
 
-innerExp :: [Char] -> Parser Exp
-innerExp tchars = foldr1 cat <$> some exp where
-  exp = choice [Builtin <$> builtin tchars
-               ,Lit <$> innerLitExp tchars
+innerExp :: Text -> [Char] -> Parser Exp
+innerExp nl tchars = foldr1 cat <$> some exp where
+  exp = choice [Lit <$> innerLitExp nl tchars
                ,Var <$> (char '$' *> dollarExp)]
 
+stmtInnerExp = innerExp " "
+recipeInnerExp = innerExp "\n"
+
 dollarExp :: Parser Exp
-dollarExp = choice [parens (innerExp [')'])
-                   ,braces (innerExp ['}'])
+dollarExp = choice [parens (builtinCall ')' <|> stmtInnerExp [')'])
+                   ,braces (builtinCall '}' <|> stmtInnerExp ['}'])
                    ,Lit <$> (option " " (T.singleton <$> anySingleBut '\n'))]
+  where builtinCall = fmap Builtin . builtin . return
 
 rexp :: Parser Exp
-rexp = innerExp []
+rexp = stmtInnerExp []
 
 lineContinuation :: Parser Text
 lineContinuation = " " <$ (char '\\' >> eol) -- Is this even correct? What does make consider a line end?
@@ -335,17 +353,17 @@ parseLWord = lword (Lit "")
 
 expArgs :: [Char] -> Natural -> Parser [Exp]
 expArgs tchars 0 = pure []
-expArgs tchars 1 = return <$> innerExp tchars
-expArgs tchars n = (:) <$> innerExp (',':tchars) <*> args (pred n) where
+expArgs tchars 1 = return <$> stmtInnerExp tchars
+expArgs tchars n = (:) <$> stmtInnerExp (',':tchars) <*> args (pred n) where
   args :: Natural -> Parser [Exp]
-  args 1 = return <$> innerExp tchars
-  args n = (:) <$> (char ',' *> innerExp (',':tchars)) <*> args (pred n)
+  args 1 = return <$> stmtInnerExp tchars
+  args n = (:) <$> (char ',' *> stmtInnerExp (',':tchars)) <*> args (pred n)
 
 expVarArgs :: [Char] -> Parser [Exp]
-expVarArgs tchars = innerExp (',':tchars) `sepBy` char ','
+expVarArgs tchars = stmtInnerExp (',':tchars) `sepBy` char ','
 
-collapseContLines :: (a -> a -> a) -> Parser a -> Parser a
-collapseContLines f p = foldr1 f <$> ((:) <$> p <*> many (lineContinuation *> p))
+collapseContLines :: Parser a -> Parser (NonEmpty a)
+collapseContLines p = (:|) <$> p <*> many (lineContinuation *> p)
 
 parseBinding :: Exp -> Parser Stmt
 parseBinding e = binder <* expSpaces <*> pure e <*> rexp
@@ -359,42 +377,45 @@ spaces :: Parser Text
 spaces = takeWhileP (Just "space") (== ' ')
 
 expSpaces :: Parser Text
-expSpaces = collapseContLines (\s1 s2 -> s1 `append` " " `append` s2) spaces
+expSpaces = foldr1 (\s1 s2 -> s1 `append` " " `append` s2) <$> collapseContLines spaces
 
 parseRule :: Exp -> Parser Rule
-parseRule e = Rule e <$> parseDependencies <*> parseRecipe
+parseRule e = Rule e <$> (optional parseDependencies <* eol) <*> parseRecipe
 
+-- FIXME double-colon rules?
 parseRuleOrVarDecl :: Exp -> Parser TopLevel
 parseRuleOrVarDecl e = (Stmt <$> parseBinding e)
                    <|> (RuleDecl <$> (char ':' *> parseRule e))
 
-parseDependencies :: Parser [Exp]
-parseDependencies = undefined
+-- FIXME when does evaluation occur here?
+parseDependencies :: Parser Exp
+parseDependencies = rexp
+
+emptyLine :: Parser (Maybe a)
+emptyLine = Nothing <$ (void eol <|> skipLineComment "#" <* option () (void eol))
+
+recipeLineLeadingWhite :: Parser ()
+recipeLineLeadingWhite = void (collapseContLines leadingWhite)
+  where leadingWhite = takeWhileP (Just "recipe leading whitespace") (`elem` [' ', '\t'])
+
+recipeLine :: Parser (Maybe Exp)
+recipeLine = char '\t' *> recipeLineLeadingWhite *> (nonEmptyRecipeLine <|> emptyLine)
+  where nonEmptyRecipeLine = Just <$> rexp
 
 parseRecipe :: Parser Recipe
-parseRecipe = undefined
+parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> emptyLine)
 
+includeStmt :: Parser Exp
+includeStmt = chunk "include" *> expSpaces *> rexp
+
+-- FIXME double-colon rules?
 parseTopLevel :: Parser TopLevel
-parseTopLevel = parseLWord >>= lwordCont
+parseTopLevel = Include <$> includeStmt
+            <|> (parseLWord >>= lwordCont)
   where lwordCont :: LWord -> Parser TopLevel
-        lwordCont (LRuleOrVarDecl e) = collapseContLines (\_ _ -> ()) (void spaces) *> parseRuleOrVarDecl e
+        lwordCont (LRuleOrVarDecl e) = expSpaces *> parseRuleOrVarDecl e
         lwordCont (LVarDecl e b) = Stmt . Bind b e <$> (expSpaces *> rexp)
         lwordCont (LRuleDecl e) = RuleDecl <$> parseRule e
 
-recipeWhite :: Parser ()
-recipeWhite = undefined
-
-{-
-parseRecipe :: Parser Recipe
-parseRecipe = many (many1 tab *> lineCont)
-  where emptySpace = undefined *> return "\n"
-        lineCont = do prefix <- takeWhileP (Just "recipe character") (/= '\n')
-                      line <- if T.last line == '\\' then append (prefix `append` " ") <$> lineCont
-                                else pure line
-                      recipeWhite
-                      return line
-
-parseTopLevel :: Parser TopLevel
-parseTopLevel = spaces *> (Stmt <$> parseStmt
-                       <|> RuleDecl <$> parseRule)
--}
+makefile :: Parser Program
+makefile = catMaybes <$> many ((Just <$> parseTopLevel) <|> emptyLine)

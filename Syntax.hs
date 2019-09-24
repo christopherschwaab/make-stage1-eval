@@ -97,20 +97,23 @@ data Stmt
   | Ifneq Exp Exp Stmt Stmt
   deriving (Eq, Show)
 
-type Program = [Stmt]
-
 newtype Value = Value { fromValue :: Text }
   deriving (Eq, Show)
 data Binding = Immediate Value | Deferred Exp
   deriving (Eq, Show)
 type Env = Map Name Binding
 data EvalState = EvalState
-  { env :: Env }
+  { env :: Env
+  , targets :: Map Text ([Text], [Exp]) }
   deriving (Eq, Show)
 
-newtype Recipe = Recipe [Text]
+newtype Recipe = Recipe [Exp]
   deriving (Eq, Show)
-data Rule = Rule Exp [Exp] Recipe
+data Rule = Rule Exp (Maybe Exp) Recipe
   deriving (Eq, Show)
-data TopLevel = Stmt Stmt | RuleDecl Rule
+data TopLevel = Stmt Stmt
+              | RuleDecl Rule
+              | Include Exp
   deriving (Eq, Show)
+
+type Program = [TopLevel]
