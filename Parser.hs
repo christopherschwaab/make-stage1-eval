@@ -169,6 +169,7 @@ evalBuiltin Notdir e = Value . intercalate " " . map notdir . splitFields . from
   where notdir = pack . takeFileName . unpack
 evalBuiltin Basename e = Value . intercalate " " . map basename . splitFields . fromValue <$> evalExp e
   where basename = pack . dropExtensions . unpack
+evalBuiltin Info e = evalExp e
 
 evalStmt :: Stmt -> Interpreter ()
 evalStmt (Bind b e1 e2) = do
@@ -250,11 +251,11 @@ braces = between (char '{') (char '}')
 
 innerLitExp :: Text -> [Char] -> Parser Text
 innerLitExp nl tchars = do
-  let nonLitChar = ['\\', '$', '\n', '#'] ++ tchars
+  let nonLitChar = ['\\', '$', '\n', '#', ':'] ++ tchars
   l <- takeWhileP (Just "right-hand literal character") (\c -> not (c `elem` nonLitChar))
-  choice [append l . append " " <$> (lineContinuation *> innerLitExp nl tchars)
-         ,append "$" <$> (chunk "$$" *> innerLitExp nl tchars)
-         ,append <$> (char '\\' *> option "\\" escaped) <*> innerLitExp nl tchars
+  choice [l `append` nl <$ try lineContinuation
+         ,"$" <$ chunk "$$"
+         ,append l <$> (char '\\' *> option "\\" escaped)
          ,guard (not (T.null l)) >> pure l]
   where escaped = choice [chunk "$ " *> pure ""
                          ,char '#'   *> pure "#"
@@ -292,21 +293,29 @@ builtin tchars = choice builtins where
              ,reserved "firstword" >> PApp . App Firstword <$> parseBuiltinArgs tchars
              ,reserved "dir" >> PApp . App Dir <$> parseBuiltinArgs tchars
              ,reserved "notdir" >> PApp . App Notdir <$> parseBuiltinArgs tchars
-             ,reserved "basename" >> PApp . App Basename <$> parseBuiltinArgs tchars]
+             ,reserved "basename" >> PApp . App Basename <$> parseBuiltinArgs tchars
+             ,reserved "info" >> PApp . App Info <$> parseBuiltinArgs tchars]
+
+varsubst :: [Char] -> Exp -> Parser Exp
+varsubst tchars e = Varsubst e <$> stmtInnerExp ('=':tchars) <*> (char '=' *> stmtInnerExp tchars)
 
 innerExp :: Text -> [Char] -> Parser Exp
 innerExp nl tchars = foldr1 cat <$> some exp where
-  exp = choice [Lit <$> innerLitExp nl tchars
-               ,Var <$> (char '$' *> dollarExp)]
+  exp :: Parser Exp
+  exp = do e <- choice [Lit <$> innerLitExp nl tchars
+                       ,char '$' *> dollarExp]
+           option e (char ':' *> varsubst tchars e)
 
 stmtInnerExp = innerExp " "
 recipeInnerExp = innerExp "\n"
 
 dollarExp :: Parser Exp
-dollarExp = choice [parens (builtinCall ')' <|> stmtInnerExp [')'])
-                   ,braces (builtinCall '}' <|> stmtInnerExp ['}'])
-                   ,Lit <$> (option " " (T.singleton <$> anySingleBut '\n'))]
+dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> stmtInnerExp [')'])
+                   ,braces (builtinCall '}' <|> builtinOrVar <$> stmtInnerExp ['}'])
+                   ,Var . Lit <$> (option " " (T.singleton <$> anySingleBut '\n'))]
   where builtinCall = fmap Builtin . builtin . return
+        builtinOrVar e@(Varsubst _ _ _) = e
+        builtinOrVar e = Var e
 
 rexp :: Parser Exp
 rexp = stmtInnerExp []
@@ -315,7 +324,7 @@ lineContinuation :: Parser Text
 lineContinuation = " " <$ (char '\\' >> eol) -- Is this even correct? What does make consider a line end?
 
 expectLineContinuation :: Char -> Parser ()
-expectLineContinuation '\n' = pure ()
+expectLineContinuation '\\' = pure ()
 expectLineContinuation _ = fail "Newlines in rule identifiers must be escaped by a backslash \\."
 
 data LWord = LRuleOrVarDecl Exp | LVarDecl Exp Binder | LRuleDecl Exp
@@ -333,7 +342,7 @@ lword prefix =  do
   leading <- takeWhileP (Just "identifier character") (not . flip elem stopChars)
   -- FIXME Tidy mess and fail on empty identifiers.
   choice [oneOf sepChars *> pure (LRuleOrVarDecl (prefix `catr` leading))
-         ,char '\n' *> expectLineContinuation (T.last leading) *> lword (prefix `catr` (leading `append` " "))
+         ,try (char '\n' >> guard (not (T.null leading) && T.last leading == '\\')) *> lword (prefix `catr` (leading `append` " "))
          ,char '=' *> pure (charToBinder leading)
          ,char ':' *> ((LVarDecl (prefix `catr` leading) ImmediateBinder <$ char '=') <|> pure (LRuleDecl (prefix `catr` leading)))
          ,char '$' *> dollarExp >>= \e -> lword (prefix `catr` leading `cat` e)]
@@ -356,7 +365,7 @@ expArgs tchars 0 = pure []
 expArgs tchars 1 = return <$> stmtInnerExp tchars
 expArgs tchars n = (:) <$> stmtInnerExp (',':tchars) <*> args (pred n) where
   args :: Natural -> Parser [Exp]
-  args 1 = return <$> stmtInnerExp tchars
+  args 1 = return <$> (char ',' *> stmtInnerExp tchars)
   args n = (:) <$> (char ',' *> stmtInnerExp (',':tchars)) <*> args (pred n)
 
 expVarArgs :: [Char] -> Parser [Exp]
@@ -400,7 +409,7 @@ recipeLineLeadingWhite = void (collapseContLines leadingWhite)
 
 recipeLine :: Parser (Maybe Exp)
 recipeLine = char '\t' *> recipeLineLeadingWhite *> (nonEmptyRecipeLine <|> emptyLine)
-  where nonEmptyRecipeLine = Just <$> rexp
+  where nonEmptyRecipeLine = Just <$> recipeInnerExp []
 
 parseRecipe :: Parser Recipe
 parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> emptyLine)

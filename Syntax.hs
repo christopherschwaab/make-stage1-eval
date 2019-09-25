@@ -25,6 +25,7 @@ data Builtin sh where
   Dir        :: Builtin Exp
   Notdir     :: Builtin Exp
   Basename   :: Builtin Exp
+  Info       :: Builtin Exp
 deriving instance Eq (Builtin sh)
 deriving instance Show (Builtin sh)
 
@@ -53,6 +54,7 @@ instance Eq PAppliedBuiltin where
   PApp (App Dir       x) == PApp (App Dir       y) = x == y
   PApp (App Notdir    x) == PApp (App Notdir    y) = x == y
   PApp (App Basename  x) == PApp (App Basename  y) = x == y
+  PApp (App Info      x) == PApp (App Info      y) = x == y
   _ == _ = False
 instance Show PAppliedBuiltin where
   show (PApp a@(App Foreach   x)) = "(PApp (" ++ show a ++ "))"
@@ -72,6 +74,7 @@ instance Show PAppliedBuiltin where
   show (PApp a@(App Dir       x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App Notdir    x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App Basename  x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App Info      x)) = "(PApp (" ++ show a ++ "))"
 
 data Exp
   = Lit Text
@@ -85,6 +88,7 @@ data Exp
   -- | Abspath Exp Exp
   -- | Eval FIXME
   deriving (Eq, Show)
+infixr `Cat`
 
 data Binder = DeferredBinder | ImmediateBinder | DefaultValueBinder | ShellBinder | AppendBinder
   deriving (Eq, Show)
