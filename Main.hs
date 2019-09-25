@@ -1,20 +1,23 @@
 module Main where
 
-import Prelude hiding (lex)
+import Prelude hiding (putStrLn, readFile)
+
+import Data.Text.IO hiding (putStr)
+import Text.Megaparsec
+import System.Environment (getArgs)
+import System.Exit (exitWith, ExitCode(..))
 
 import Parser
 import Syntax
 
-(=:) :: Exp -> Exp -> Stmt
-e1 =: e2 = Bind ImmediateBinder e2 e2
-
 main :: IO ()
-main = return ()
---main = print =<< (run $
---  [Lit "x" =: Lit "xvalue"
---  ,Lit "xvalue" =: Lit "pig"
---  ,Lit "z" =: Var (Lit "x")
---  ,SExp (Shell (Lit "echo " `Cat` Wildcard (Lit "*/*.cache")))
---  ,Lit "y" =: Shell (Lit "ls -1")
---  ,Lit "q" =: Patsubst (Lit "%.c") (Lit "%.o") (Lit "a.c b.c c.c.c a.h")
---  ,Lit "q'" =: Varsubst (Lit "q") (Lit ".o") (Lit ".c")])
+main = do
+  args <- getArgs
+  if length args /= 1
+    then do putStrLn "Usage: makeeval Makefile"
+            exitWith (ExitFailure 1)
+    else do let fname = head args
+            r <- parse makefile fname <$> readFile fname
+            case r of
+              Left err -> putStr (errorBundlePretty err)
+              Right x -> print x
