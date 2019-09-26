@@ -200,14 +200,13 @@ evalStmt (Bind b e1 e2) = do
       put (st{env=p'})
 evalStmt (SExp e) = () <$ evalExp e
 evalStmt Skip = return ()
-evalStmt (Ifeq e1 e2 s1 s2) = do Value v1 <- evalExp e1
-                                 Value v2 <- evalExp e2
-                                 if v1 == v2 then evalStmt s1
-                                   else evalStmt s2
-evalStmt (Ifneq e1 e2 s1 s2) = do Value v1 <- evalExp e1
-                                  Value v2 <- evalExp e2
-                                  if v1 /= v2 then evalStmt s1
-                                    else evalStmt s2
+evalStmt (IfStmt p e1 e2 s1 s2) = do
+  Value v1 <- evalExp e1
+  Value v2 <- evalExp e2
+  if evalIfPred p v1 v2 then evalStmt s1
+    else evalStmt s2
+  where evalIfPred EqPred  = (==)
+        evalIfPred NeqPred = (/=)
 
 -- FIXME double check the order things get evaluated here
 evalRule :: Rule -> Interpreter ()
@@ -249,18 +248,19 @@ parens = between (char '(') (char ')')
 braces :: Parser a -> Parser a
 braces = between (char '{') (char '}')
 
-innerLitExp :: Text -> [Char] -> Parser Text
-innerLitExp nl tchars = do
+escaped :: Text -> Parser Text
+escaped nl = choice [char '#'   *> pure "#"
+                    ,char '\\'  *> pure "\\"
+                    ,char '\n'  *> pure nl]
+
+litExp :: Text -> [Char] -> Parser Text
+litExp nl tchars = foldr1 append <$> some (do
   let nonLitChar = ['\\', '$', '\n', '#', ':'] ++ tchars
-  l <- takeWhileP (Just "right-hand literal character") (\c -> not (c `elem` nonLitChar))
+  l <- takeWhileP (Just "literal character") (\c -> not (c `elem` nonLitChar))
   choice [l `append` nl <$ try lineContinuation
          ,"$" <$ chunk "$$"
-         ,append l <$> (char '\\' *> option "\\" escaped)
-         ,guard (not (T.null l)) >> pure l]
-  where escaped = choice [chunk "$ " *> pure ""
-                         ,char '#'   *> pure "#"
-                         ,char '\\'  *> pure "\\"
-                         ,char '\n'  *> pure nl]
+         ,append l <$> (char '\\' *> option "\\" (escaped nl))
+         ,l <$ guard (not (T.null l))])
 
 class ParseBuiltinArgs sh where
   parseBuiltinArgs :: [Char] -> Parser sh
@@ -302,7 +302,7 @@ varsubst tchars e = Varsubst e <$> stmtInnerExp ('=':tchars) <*> (char '=' *> st
 innerExp :: Text -> [Char] -> Parser Exp
 innerExp nl tchars = foldr1 cat <$> some exp where
   exp :: Parser Exp
-  exp = do e <- choice [Lit <$> innerLitExp nl tchars
+  exp = do e <- choice [Lit <$> litExp nl tchars
                        ,char '$' *> dollarExp]
            option e (char ':' *> varsubst tchars e)
 
@@ -312,8 +312,10 @@ recipeInnerExp = innerExp "\n"
 dollarExp :: Parser Exp
 dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> stmtInnerExp [')'])
                    ,braces (builtinCall '}' <|> builtinOrVar <$> stmtInnerExp ['}'])
-                   ,Var . Lit <$> (option " " (T.singleton <$> anySingleBut '\n'))]
-  where builtinCall = fmap Builtin . builtin . return
+                   ,Var . Lit <$> singleCharVar]
+  where singleCharVar = (char '\\' *> escaped " ")
+                    <|> option "" (T.singleton <$> anySingleBut '\n')
+        builtinCall = fmap Builtin . builtin . return
         builtinOrVar e@(Varsubst _ _ _) = e
         builtinOrVar e = Var e
 
@@ -338,22 +340,19 @@ lwordExp (LRuleDecl e) = e
 -- This seems to basically accept anything (including strange unicode space
 -- chars) except ascii space, newline, tab, and carriage return.
 lword :: Exp -> Parser LWord
-lword prefix =  do
-  leading <- takeWhileP (Just "identifier character") (not . flip elem stopChars)
-  -- FIXME Tidy mess and fail on empty identifiers.
-  choice [oneOf sepChars *> pure (LRuleOrVarDecl (prefix `catr` leading))
-         ,try (char '\n' >> guard (not (T.null leading) && T.last leading == '\\')) *> lword (prefix `catr` (leading `append` " "))
-         ,char '=' *> pure (charToBinder leading)
-         ,char ':' *> ((LVarDecl (prefix `catr` leading) ImmediateBinder <$ char '=') <|> pure (LRuleDecl (prefix `catr` leading)))
-         ,char '$' *> dollarExp >>= \e -> lword (prefix `catr` leading `cat` e)]
-  where sepChars = [' ', '\t']
-        stopChars = sepChars ++ ['\n', '=', ':', '$']
-        charToBinder l = Map.findWithDefault
-                           (LVarDecl (prefix `catr` l) DeferredBinder)
-                           (T.last l)
-                           (Map.fromList [('?', LVarDecl (prefix `catr` T.init l) DefaultValueBinder)
-                                         ,('!', LVarDecl (prefix `catr` T.init l) ShellBinder)
-                                         ,('+', LVarDecl (prefix `catr` T.init l) AppendBinder)])
+lword acc = do
+  l <- option "" (litExp " " ['=', ' ', '\t'])
+  let name = acc `catr` l
+  choice [oneOf [' ', '\t'] *> pure (LRuleOrVarDecl name)
+         ,char ':' *> (immDecl name <|> pure (LRuleDecl name))
+         ,char '=' *> pure (LVarDecl (acc `catr` T.init l) (binder l))
+         ,char '$' *> dollarExp >>= \e -> lword (name `cat` e)]
+  where immDecl name = char '=' *> pure (LVarDecl name ImmediateBinder)
+        binder l = case T.last l of
+                     '?' -> DefaultValueBinder
+                     '!' -> ShellBinder
+                     '+' -> AppendBinder
+                     _   -> DeferredBinder
 {-# INLINE lword #-}
 
 parseLWord :: Parser LWord
@@ -375,7 +374,7 @@ collapseContLines :: Parser a -> Parser (NonEmpty a)
 collapseContLines p = (:|) <$> p <*> many (lineContinuation *> p)
 
 parseBinding :: Exp -> Parser Stmt
-parseBinding e = binder <* expSpaces <*> pure e <*> rexp
+parseBinding e = binder <* expSpaces <*> pure e <*> option (Lit "") rexp
   where binder :: Parser (Exp -> Exp -> Stmt)
         binder = choice [char '='   *> pure (Bind DeferredBinder)
                         ,chunk ":=" *> pure (Bind ImmediateBinder)
@@ -412,18 +411,29 @@ recipeLine = char '\t' *> recipeLineLeadingWhite *> (nonEmptyRecipeLine <|> empt
   where nonEmptyRecipeLine = Just <$> recipeInnerExp []
 
 parseRecipe :: Parser Recipe
-parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> emptyLine)
+parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> blankLine)
+  where blankLine = recipeLineLeadingWhite *> emptyLine
 
-includeStmt :: Parser Exp
-includeStmt = chunk "include" *> expSpaces *> rexp
+includeExp :: Parser Exp
+includeExp = try (chunk "include" *> expSpaces) *> rexp
+
+ifStmt :: Parser Stmt
+ifStmt = undefined
+--ifStmt :: Parser Stmt
+--ifStmt = try ((Ifeq <$ chunk "ifeq") <|> (Ifneq <$ chunk "ifneq") *> expSpaces)
+--     <$> parens (stmtInnerExp [','])
+--     <*> (char ',' *> rexp)
+--     <*> "else"
 
 -- FIXME double-colon rules?
+-- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
 parseTopLevel :: Parser TopLevel
-parseTopLevel = Include <$> includeStmt
-            <|> (parseLWord >>= lwordCont)
+parseTopLevel = choice [Include <$> includeExp
+                       ,Stmt <$> ifStmt
+                       ,parseLWord >>= lwordCont]
   where lwordCont :: LWord -> Parser TopLevel
         lwordCont (LRuleOrVarDecl e) = expSpaces *> parseRuleOrVarDecl e
-        lwordCont (LVarDecl e b) = Stmt . Bind b e <$> (expSpaces *> rexp)
+        lwordCont (LVarDecl e b) = Stmt . Bind b e <$> (expSpaces *> option (Lit "") rexp)
         lwordCont (LRuleDecl e) = RuleDecl <$> parseRule e
 
 makefile :: Parser Program

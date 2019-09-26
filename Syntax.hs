@@ -2,7 +2,8 @@
 module Syntax where
 
 import Data.Map (Map)
-import Data.Text (Text)
+import Data.Text (Text, append)
+import qualified Data.Text as T
 import Unsafe.Coerce (unsafeCoerce)
 
 type Name = Text
@@ -93,12 +94,12 @@ infixr `Cat`
 data Binder = DeferredBinder | ImmediateBinder | DefaultValueBinder | ShellBinder | AppendBinder
   deriving (Eq, Show)
 
+data IfPred = EqPred | NeqPred deriving (Eq, Show)
 data Stmt
   = Bind Binder Exp Exp
   | SExp Exp
   | Skip
-  | Ifeq Exp Exp Stmt Stmt
-  | Ifneq Exp Exp Stmt Stmt
+  | IfStmt IfPred Exp Exp Stmt Stmt
   deriving (Eq, Show)
 
 newtype Value = Value { fromValue :: Text }
@@ -121,3 +122,79 @@ data TopLevel = Stmt Stmt
   deriving (Eq, Show)
 
 type Program = [TopLevel]
+
+class PrettyAppExp sh where
+  prettyAppExp :: sh -> Text
+instance PrettyAppExp a => PrettyAppExp [a] where
+  prettyAppExp es = T.intercalate "," (map prettyAppExp es)
+instance (PrettyAppExp a, PrettyAppExp b, PrettyAppExp c) => PrettyAppExp (a, b, c) where
+  prettyAppExp (e1, e2, e3) = prettyAppExp e1
+                     `append` ","
+                     `append` prettyAppExp e2
+                     `append` ","
+                     `append` prettyAppExp e3
+instance (PrettyAppExp a, PrettyAppExp b) => PrettyAppExp (a, b) where
+  prettyAppExp (e1, e2) = prettyAppExp e1 `append` "," `append` prettyAppExp e2
+instance PrettyAppExp Exp where
+  prettyAppExp = prettyExp
+
+prettyPApp :: PAppliedBuiltin -> Text
+prettyPApp (PApp (App Foreach   x)) = "foreach " `append` prettyAppExp x
+prettyPApp (PApp (App Filter    x)) = "filter " `append` prettyAppExp x
+prettyPApp (PApp (App FilterOut x)) = "filter-out " `append` prettyAppExp x
+prettyPApp (PApp (App If        x)) = "if " `append` prettyAppExp x
+prettyPApp (PApp (App And       x)) = "and " `append` prettyAppExp x
+prettyPApp (PApp (App Shell     x)) = "shell " `append` prettyAppExp x
+prettyPApp (PApp (App Wildcard  x)) = "wildcard " `append` prettyAppExp x
+prettyPApp (PApp (App Patsubst  x)) = "patsubst " `append` prettyAppExp x
+prettyPApp (PApp (App Call      x)) = "call " `append` prettyAppExp x
+prettyPApp (PApp (App Error     x)) = "error " `append` prettyAppExp x
+prettyPApp (PApp (App Sort      x)) = "sort " `append` prettyAppExp x
+prettyPApp (PApp (App Subst     x)) = "subst " `append` prettyAppExp x
+prettyPApp (PApp (App Word      x)) = "word " `append` prettyAppExp x
+prettyPApp (PApp (App Firstword x)) = "firstword " `append` prettyAppExp x
+prettyPApp (PApp (App Dir       x)) = "dir " `append` prettyAppExp x
+prettyPApp (PApp (App Notdir    x)) = "notdir " `append` prettyAppExp x
+prettyPApp (PApp (App Basename  x)) = "basename " `append` prettyAppExp x
+prettyPApp (PApp (App Info      x)) = "info " `append` prettyAppExp x
+
+prettyExp :: Exp -> Text
+prettyExp (Lit t) = t -- FIXME escape
+prettyExp (Var e) = "$(" `append` prettyExp e `append` ")"
+prettyExp (e1 `Cat` e2) = prettyExp e1 `append` prettyExp e2
+prettyExp (Varsubst e1 e2 e3) = T.concat ["$(", prettyExp e1, ":", prettyExp e2, "=", prettyExp e3, ")"]
+prettyExp (Builtin app) = "$(" `append` prettyPApp app `append` ")"
+
+prettyBinder :: Binder -> Text
+prettyBinder DeferredBinder = "="
+prettyBinder ImmediateBinder = ":="
+prettyBinder DefaultValueBinder = "?="
+prettyBinder ShellBinder = "!="
+prettyBinder AppendBinder = "+="
+
+prettyRecipe :: Recipe -> Text
+prettyRecipe (Recipe es) = "\t" `append` T.intercalate "\n\t" (map prettyExp es)
+
+prettyRule :: Rule -> Text
+prettyRule (Rule e mdeps r) = prettyExp e `append` ":" `append` prettyDeps mdeps `append` "\n" `append` prettyRecipe r
+  where prettyDeps (Just deps) = " " `append` prettyExp deps
+        prettyDeps Nothing = ""
+
+prettyStmt :: Stmt -> Text
+prettyStmt (Bind b e1 e2) = T.intercalate " " [prettyExp e1, prettyBinder b, prettyExp e2]
+prettyStmt (SExp e) = prettyExp e
+prettyStmt Skip = T.empty
+prettyStmt (IfStmt p e1 e2 s1 s2) = case s2 of
+  Skip -> T.intercalate "\n" [prettyEq, "\t" `append` prettyStmt s1, "else", "\t" `append` prettyStmt s2, "endif"]
+  _    -> T.intercalate "\n" [prettyEq, "\t" `append` prettyStmt s1, "endif"]
+  where prettyEq = T.concat [prettyIfPred p, " (", prettyExp e1, ",", prettyExp e2, ")"]
+        prettyIfPred EqPred = "ifeq"
+        prettyIfPred NeqPred = "ifneq"
+
+prettyTopLevel :: TopLevel -> Text
+prettyTopLevel (Stmt s) = prettyStmt s
+prettyTopLevel (RuleDecl r) = T.concat ["\n", prettyRule r, "\n"]
+prettyTopLevel (Include e) = "include " `append` prettyExp e
+
+prettyProgram :: Program -> Text
+prettyProgram ts = T.intercalate "\n" (map prettyTopLevel ts)

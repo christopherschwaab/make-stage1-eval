@@ -3,6 +3,7 @@ module Main where
 import Prelude hiding (putStrLn, readFile)
 
 import Data.Text.IO hiding (putStr)
+import qualified Data.Text.IO as TIO
 import Text.Megaparsec
 import System.Environment (getArgs)
 import System.Exit (exitWith, ExitCode(..))
@@ -20,4 +21,4 @@ main = do
             r <- parse makefile fname <$> readFile fname
             case r of
               Left err -> putStr (errorBundlePretty err)
-              Right x -> print x
+              Right p -> TIO.putStr (prettyProgram p)

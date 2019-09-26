@@ -15,6 +15,10 @@ import Gen
 
 spec :: Spec
 spec = do
+  describe "litExp" $ do
+    it "matches non-escaping backslashes" $ do
+      parse (litExp " " []) "" "\\x" `shouldParse` "\\x"
+
   describe "rexp" $ do
     it "matches literals" $ do
       parse rexp "" "some literal \\string" `shouldParse` Lit "some literal \\string"
@@ -51,6 +55,11 @@ and more|]
       parse rexp "" lineContEnd `shouldParse` Lit "a line with a continued, empty next line "
       parse rexp "" "$$" `shouldParse` Lit "$"
 
+    --FIXME
+    --it [r|handles x := xval\\\$\\\#2|] $ do
+    --  let weirdVar = [r|xval\\\$\\\#2|]
+    --  parse rexp "" weirdVar  `shouldParse` (Lit "xval\\\\")
+
   describe "parseLWord" $ do
     it "matches ambiguous leading binder characters in variable names" $ do
       parse parseLWord "" "xvar!??=" `shouldParse` LVarDecl (Lit "xvar!?") DefaultValueBinder
@@ -79,10 +88,10 @@ and more|]
       parse parseLWord "" "xrule\\  :" `shouldParse` LRuleOrVarDecl (Lit "xrule\\")
       parse parseLWord "" "xvar\\  :=" `shouldParse` LRuleOrVarDecl (Lit "xvar\\")
 
-    it [r|handles x := xval\\\$\\\#2|] $ do
-      let weirdVar = [r|x := xval\\\$\\\#2|]
-      parse parseLWord "" weirdVar  `shouldParse` LRuleOrVarDecl (Lit "x")
-      runParser' parseLWord (initialState weirdVar) `succeedsLeaving` [r|:= xval\\\$\\\#2|]
+    --it [r|handles x := xval\\\$\\\#2|] $ do
+    --  let weirdVar = [r|x := xval\\\$\\\#2|]
+    --  parse parseLWord "" weirdVar  `shouldParse` LRuleOrVarDecl (Lit "x")
+    --  runParser' parseLWord (initialState weirdVar) `succeedsLeaving` [r|:= xval\\\$\\\#2|]
 
   describe "parseRecipe" $ do
     let simpleRecipe1 = [r|	echo calling all 1|]
@@ -101,6 +110,7 @@ with a newline in it|]
 |]
     let mostlyEmptyLinesRecipe = [r|
 	
+   
 
 #
 	    
@@ -124,6 +134,14 @@ with a newline in it|]
     it "accepts a non-empty line between empty lines" $ do
       runParser' parseRecipe (initialState mostlyEmptyLinesRecipe ) `succeedsLeaving` ""
       parse parseRecipe "" mostlyEmptyLinesRecipe `shouldParse` Recipe [Lit "echo single command between empty lines"]
+
+  describe "parseTopLevel" $ do
+    it [r|handles x := xval\\\$\\\#2|] $ do
+      let weirdVar = [r|x := xval\\\$\\\#2|]
+      parse parseTopLevel "" weirdVar `shouldParse` Stmt (Bind ImmediateBinder (Lit "x") (Lit "xval\\\\" `Cat` Var (Lit "\\") `Cat` Lit "#2"))
+
+    it "parses variable-named variable-binding" $ do
+      parse parseTopLevel "" "$(backslash) = backslash_value" `shouldParse` Stmt (Bind DeferredBinder (Var (Lit "backslash")) (Lit "backslash_value"))
 
   describe "makefile" $ do
     it "parses basic makefiles" $ do
