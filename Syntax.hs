@@ -6,8 +6,6 @@ import Data.Text (Text, append)
 import qualified Data.Text as T
 import Unsafe.Coerce (unsafeCoerce)
 
-type Name = Text
-
 data Builtin sh where
   Foreach    :: Builtin (Exp, Exp, Exp) -- Collapses whitespace
   Filter     :: Builtin (Exp, Exp)-- collapses whitespace?
@@ -94,27 +92,23 @@ infixr `Cat`
 data Binder = DeferredBinder | ImmediateBinder | DefaultValueBinder | ShellBinder | AppendBinder
   deriving (Eq, Show)
 
-data IfPred = EqPred | NeqPred deriving (Eq, Show)
+data IfPred
+  = EqPred Exp Exp
+  | NeqPred Exp Exp
+  | DefinedPred Exp
+  | NotDefinedPred Exp
+  deriving (Eq, Show)
 data Stmt
-  = Bind Binder Exp Exp
+  = Bind Bool Binder Exp Exp
+  | IfStmt IfPred [TopLevel] [TopLevel]
   | SExp Exp
-  | Skip
-  | IfStmt IfPred Exp Exp Stmt Stmt
-  deriving (Eq, Show)
-
-newtype Value = Value { fromValue :: Text }
-  deriving (Eq, Show)
-data Binding = Immediate Value | Deferred Exp
-  deriving (Eq, Show)
-type Env = Map Name Binding
-data EvalState = EvalState
-  { env :: Env
-  , targets :: Map Text ([Text], [Exp]) }
   deriving (Eq, Show)
 
 newtype Recipe = Recipe [Exp]
   deriving (Eq, Show)
-data Rule = Rule Exp (Maybe Exp) Recipe
+data RuleExp = RExp Exp | RBind Exp Exp
+  deriving (Eq, Show)
+data Rule = Rule Exp (Maybe Exp) Recipe -- FIXME add locally bound variables to deps
   deriving (Eq, Show)
 data TopLevel = Stmt Stmt
               | RuleDecl Rule
@@ -175,21 +169,36 @@ prettyBinder AppendBinder = "+="
 prettyRecipe :: Recipe -> Text
 prettyRecipe (Recipe es) = "\t" `append` T.intercalate "\n\t" (map prettyExp es)
 
+prettyRuleExp :: RuleExp -> Text
+prettyRuleExp (RExp e) = prettyExp e
+prettyRuleExp (RBind e1 e2) = T.concat [prettyExp e1, "=", prettyExp e2]
+
 prettyRule :: Rule -> Text
 prettyRule (Rule e mdeps r) = prettyExp e `append` ":" `append` prettyDeps mdeps `append` "\n" `append` prettyRecipe r
   where prettyDeps (Just deps) = " " `append` prettyExp deps
         prettyDeps Nothing = ""
 
+indent :: Int -> Text -> Text
+indent d t = T.replicate d "\t" `append` t
+
 prettyStmt :: Stmt -> Text
-prettyStmt (Bind b e1 e2) = T.intercalate " " [prettyExp e1, prettyBinder b, prettyExp e2]
+prettyStmt (Bind override b e1 e2) =
+  let t = T.intercalate " " [prettyExp e1, prettyBinder b, prettyExp e2]
+  in if override then "override " `append` t
+       else t
 prettyStmt (SExp e) = prettyExp e
-prettyStmt Skip = T.empty
-prettyStmt (IfStmt p e1 e2 s1 s2) = case s2 of
-  Skip -> T.intercalate "\n" [prettyEq, "\t" `append` prettyStmt s1, "else", "\t" `append` prettyStmt s2, "endif"]
-  _    -> T.intercalate "\n" [prettyEq, "\t" `append` prettyStmt s1, "endif"]
-  where prettyEq = T.concat [prettyIfPred p, " (", prettyExp e1, ",", prettyExp e2, ")"]
-        prettyIfPred EqPred = "ifeq"
-        prettyIfPred NeqPred = "ifneq"
+prettyStmt (IfStmt p ss1 ss2) =
+  let prettySs1 = T.intercalate "\n\t" (map prettyTopLevel ss1)
+      prettyPred = prettyIfPred p
+  in if null ss2
+       then T.intercalate "\n" [prettyPred, "\t" `append` prettySs1, "endif"]
+       else let prettySs2 = T.intercalate "\n\t" (map prettyTopLevel ss2)
+            in T.intercalate "\n" [prettyPred, "\t" `append` prettySs1, "else", "\t" `append` prettySs2, "endif"]
+  where prettyBinIf e1 e2 = T.concat [" (", prettyExp e1, ",", prettyExp e2, ")"]
+        prettyIfPred (EqPred e1 e2) = "ifeq " `append` prettyBinIf e1 e2
+        prettyIfPred (NeqPred e1 e2) = "ifneq " `append` prettyBinIf e1 e2
+        prettyIfPred (DefinedPred e) = "ifdef " `append` prettyExp e
+        prettyIfPred (NotDefinedPred e) = "ifndef "  `append` prettyExp e
 
 prettyTopLevel :: TopLevel -> Text
 prettyTopLevel (Stmt s) = prettyStmt s

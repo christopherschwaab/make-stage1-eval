@@ -55,10 +55,18 @@ and more|]
       parse rexp "" lineContEnd `shouldParse` Lit "a line with a continued, empty next line "
       parse rexp "" "$$" `shouldParse` Lit "$"
 
-    --FIXME
-    --it [r|handles x := xval\\\$\\\#2|] $ do
-    --  let weirdVar = [r|xval\\\$\\\#2|]
-    --  parse rexp "" weirdVar  `shouldParse` (Lit "xval\\\\")
+    it [r|handles x := xval\\\$\\\#2|] $ do
+      let weirdVar = [r|xval\\\$\\\#2|]
+      parse rexp "" weirdVar  `shouldParse` (Lit "xval\\\\" `Cat` Var (Lit "\\") `Cat` Lit "#2")
+
+    it "allows : literals outside varsubst" $ do
+      parse rexp "" "dir/path/:$(fname)" `shouldParse` (Lit "dir/path/:" `Cat` Var (Lit "fname"))
+      parse rexp "" "$(foreach fname,$(FNAMES),dir/path/:$(fname))" `shouldParse`
+        (Builtin (PApp (App Foreach (Lit "fname",Var (Lit "FNAMES"),Lit "dir/path/:" `Cat` Var (Lit "fname")))))
+
+    it "handles escaped parentheses" $ do
+      parse rexp "" "$(shell find -regex '.*\\.\\(cpp\\|qrc\\)' )" `shouldParse`
+        (Builtin (PApp (App Shell (Lit "find -regex '.*\\.\\(cpp\\|qrc\\)' "))))
 
   describe "parseLWord" $ do
     it "matches ambiguous leading binder characters in variable names" $ do
@@ -88,10 +96,8 @@ and more|]
       parse parseLWord "" "xrule\\  :" `shouldParse` LRuleOrVarDecl (Lit "xrule\\")
       parse parseLWord "" "xvar\\  :=" `shouldParse` LRuleOrVarDecl (Lit "xvar\\")
 
-    --it [r|handles x := xval\\\$\\\#2|] $ do
-    --  let weirdVar = [r|x := xval\\\$\\\#2|]
-    --  parse parseLWord "" weirdVar  `shouldParse` LRuleOrVarDecl (Lit "x")
-    --  runParser' parseLWord (initialState weirdVar) `succeedsLeaving` [r|:= xval\\\$\\\#2|]
+    it "stops at =" $ do
+      parse parseLWord "" "xvar=" `shouldParse` LVarDecl (Lit "xvar") DeferredBinder
 
   describe "parseRecipe" $ do
     let simpleRecipe1 = [r|	echo calling all 1|]
@@ -138,10 +144,117 @@ with a newline in it|]
   describe "parseTopLevel" $ do
     it [r|handles x := xval\\\$\\\#2|] $ do
       let weirdVar = [r|x := xval\\\$\\\#2|]
-      parse parseTopLevel "" weirdVar `shouldParse` Stmt (Bind ImmediateBinder (Lit "x") (Lit "xval\\\\" `Cat` Var (Lit "\\") `Cat` Lit "#2"))
+      parse parseTopLevel "" weirdVar `shouldParse` Stmt (Bind False ImmediateBinder (Lit "x") (Lit "xval\\\\" `Cat` Var (Lit "\\") `Cat` Lit "#2"))
 
     it "parses variable-named variable-binding" $ do
-      parse parseTopLevel "" "$(backslash) = backslash_value" `shouldParse` Stmt (Bind DeferredBinder (Var (Lit "backslash")) (Lit "backslash_value"))
+      parse parseTopLevel "" "$(backslash) = backslash_value" `shouldParse` Stmt (Bind False DeferredBinder (Var (Lit "backslash")) (Lit "backslash_value"))
+
+    --it "supportes standalone expressions" $ do
+    --  parse parseTopLevel "" "$(if $(filter-out none,$(PRODUCT)),,$(error Unable to determine the target product))" `shouldParse`
+    --    Stmt (SExp (Lit ("")))
+
+  describe "ifStmt" $ do
+    it "parses basic if" $ do
+      let ifEq11 = [r|ifeq (1,1)
+	x = ok
+endif
+|]
+      parse ifStmt "" ifEq11 `shouldParse` IfStmt (EqPred (Lit "1") (Lit "1")) [Stmt (Bind False DeferredBinder (Lit "x") (Lit "ok"))] []
+
+      let ifNeqMultiLine = [r|ifneq (x x,x y)
+	x = ok line  1  
+	x += appending stuff to x 
+endif
+|]
+      parse ifStmt "" ifNeqMultiLine `shouldParse` IfStmt (NeqPred (Lit "x x") (Lit "x y"))
+                                                          [Stmt (Bind False DeferredBinder (Lit "x") (Lit "ok line  1  "))
+                                                          ,Stmt (Bind False AppendBinder (Lit "x") (Lit "appending stuff to x "))]
+                                                          []
+
+    it "parses else blocks" $ do
+      let ifEq11 = [r|ifeq (1,1)
+	eq11 = true
+else
+	eq11 = false
+endif
+|]
+      parse ifStmt "" ifEq11 `shouldParse` IfStmt (EqPred (Lit "1") (Lit "1"))
+                                                  [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "true"))]
+                                                  [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "false"))]
+
+    it "accepts expressions in test fields" $ do
+      let ifEqMultiLine = [r|ifneq (x$(ok),xok_value)
+	x$(ok) = ok line  $1  
+	x$(ok) += append $(x$(stuff))
+endif
+|]
+      parse ifStmt "" ifEqMultiLine `shouldParse`
+        IfStmt (NeqPred (Lit "x" `Cat` Var (Lit "ok"))
+                        (Lit "xok_value"))
+               [Stmt (Bind False DeferredBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "ok line  " `Cat` Var (Lit "1") `Cat` Lit "  "))
+               ,Stmt (Bind False AppendBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "append " `Cat` Var (Lit "x" `Cat` Var (Lit "stuff"))))]
+               []
+
+    it "accepts empty test fields" $ do
+      let emptyField1 = [r|ifneq (,xok_value)
+	42 = 43
+endif
+|]
+      let emptyField2 = [r|ifeq ($x,)
+	42 = 43
+endif
+|]
+      let bothEmpty = [r|ifeq (,)
+	42 = 43
+endif
+|]
+      parse ifStmt "" emptyField1 `shouldParse`
+        IfStmt (NeqPred (Lit "") (Lit "xok_value"))
+               [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
+               []
+
+      parse ifStmt "" emptyField2 `shouldParse`
+        IfStmt (EqPred (Var (Lit "x")) (Lit ""))
+               [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
+               []
+
+      parse ifStmt "" bothEmpty `shouldParse`
+        IfStmt (EqPred (Lit "") (Lit ""))
+               [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
+               []
+
+    it "matches binding of else variable in if block" $ do
+      let bindElseInIf = [r|ifeq (1,1)
+	else = this is terrible
+endif
+|]
+      parse ifStmt "" bindElseInIf `shouldParse`
+        IfStmt (EqPred (Lit "1") (Lit "1"))
+               [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
+               []
+
+      let bindElseInIfWithElse = [r|ifeq (1,1)
+	else = this is terrible
+else
+	else = this is still terrible
+endif
+|]
+      parse ifStmt "" bindElseInIfWithElse `shouldParse`
+        IfStmt (EqPred (Lit "1") (Lit "1"))
+               [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
+               [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is still terrible"))]
+
+    it "requires the if block be closed" $ do
+      let openIf = [r|ifeq (1,1)
+	x = unclosed if block
+|]
+      let openElse = [r|ifeq (1,1)
+	x = unclosed if block
+else
+	y = unclosed if block
+|]
+      parse ifStmt "" `shouldFailOn` openIf
+      parse ifStmt "" `shouldFailOn` openElse
 
   describe "makefile" $ do
     it "parses basic makefiles" $ do
