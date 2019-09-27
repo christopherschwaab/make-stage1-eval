@@ -1,4 +1,4 @@
-{-#LANGUAGE GADTs, StandaloneDeriving #-}
+{-#LANGUAGE GADTs, StandaloneDeriving, FlexibleInstances #-}
 module Syntax where
 
 import Data.Map (Map)
@@ -10,7 +10,7 @@ data Builtin sh where
   Foreach    :: Builtin (Exp, Exp, Exp) -- Collapses whitespace
   Filter     :: Builtin (Exp, Exp)-- collapses whitespace?
   FilterOut  :: Builtin (Exp, Exp) -- collapses whitespace?
-  If         :: Builtin (Exp, Exp, Exp) -- collapses whitespace?
+  If         :: Builtin (Exp, Exp, Maybe Exp) -- collapses whitespace?
   And        :: Builtin [Exp] -- collapses whitespace?
   Shell      :: Builtin Exp -- Collapses whitespace
   Wildcard   :: Builtin Exp
@@ -121,7 +121,10 @@ class PrettyAppExp sh where
   prettyAppExp :: sh -> Text
 instance PrettyAppExp a => PrettyAppExp [a] where
   prettyAppExp es = T.intercalate "," (map prettyAppExp es)
-instance (PrettyAppExp a, PrettyAppExp b, PrettyAppExp c) => PrettyAppExp (a, b, c) where
+instance (PrettyAppExp a, PrettyAppExp b) => PrettyAppExp (a, b, Maybe Exp) where
+  prettyAppExp (e1, e2, Just e3) = prettyAppExp (e1, e2, e3)
+  prettyAppExp (e1, e2, Nothing) = prettyAppExp (e1, e2)
+instance (PrettyAppExp a, PrettyAppExp b) => PrettyAppExp (a, b, Exp) where
   prettyAppExp (e1, e2, e3) = prettyAppExp e1
                      `append` ","
                      `append` prettyAppExp e2

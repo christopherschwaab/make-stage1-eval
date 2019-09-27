@@ -131,7 +131,7 @@ evalBuiltin FilterOut (e1, e2) = do
   return (Value (intercalate " " ws'))
 evalBuiltin If (e1, e2, e3) = do Value p <- evalExp e1
                                  if T.null p then evalExp e2
-                                   else evalExp e3
+                                   else maybe (pure (Value "")) evalExp e3
 evalBuiltin And es = evalAnd "" es where
   evalAnd r (e:es) = do Value v <- evalExp e
                         if T.null v then return (Value "")
@@ -286,6 +286,13 @@ instance ParseBuiltinArgs (Exp, Exp) where
   parseBuiltinArgs tchars = expArgs tchars 2 >>= \[x,y] -> return (x, y)
 instance ParseBuiltinArgs (Exp, Exp, Exp) where
   parseBuiltinArgs tchars = expArgs tchars 3 >>= \[x,y,z] -> return (x, y, z)
+instance ParseBuiltinArgs (Exp, Exp, Maybe Exp) where
+  parseBuiltinArgs tchars = ifArgs tchars
+
+ifArgs :: [Char] -> Parser (Exp, Exp, Maybe Exp)
+ifArgs tchars = (,,) <$> expArg (',':tchars)
+                     <*> (char ',' *> expArg (',':tchars))
+                     <*> optional (char ',' *> expArg tchars)
 
 builtin :: [Char] -> Parser PAppliedBuiltin
 builtin tchars = choice builtins where
@@ -294,7 +301,7 @@ builtin tchars = choice builtins where
   builtins = [reserved "foreach" >> PApp . App Foreach <$> parseBuiltinArgs tchars
              ,reserved "filter" >> PApp . App Filter <$> parseBuiltinArgs tchars
              ,reserved "filter-out" >> PApp . App FilterOut <$> parseBuiltinArgs tchars
-             ,reserved "if" >> PApp . App If <$> parseBuiltinArgs tchars
+             ,reserved "if" >> PApp . App If <$> ifArgs tchars
              ,reserved "and" >> PApp . App And <$> parseBuiltinArgs tchars
              ,reserved "shell" >> PApp . App Shell <$> parseBuiltinArgs tchars
              ,reserved "wildcard" >> PApp . App Wildcard <$> parseBuiltinArgs tchars
@@ -348,12 +355,6 @@ expectLineContinuation _ = fail "Newlines in rule identifiers must be escaped by
 
 data LWord = LRuleOrVarDecl Exp | LVarDecl Exp Binder | LRuleDecl Exp | LExp Exp
   deriving (Eq, Show)
-
-lwordExp :: LWord -> Exp
-lwordExp (LRuleOrVarDecl e) = e
-lwordExp (LVarDecl e _) = e
-lwordExp (LRuleDecl e) = e
-lwordExp (LExp e) = e
 
 -- This seems to basically accept anything (including strange unicode space
 -- chars) except ascii space, newline, tab, and carriage return.
@@ -463,7 +464,7 @@ ifPred = unaryIfPred <|> binIfPred
                       <*> (option (Lit "") (stmtInnerExp [')']) <* char ')')
 
 guardedTopLevel :: Parser a -> Parser Program
-guardedTopLevel p = catMaybes <$> many (expSpaces *> notFollowedBy p *> topLevel)
+guardedTopLevel p = catMaybes <$> many (notFollowedBy p *> expSpaces *> topLevel)
   where topLevel = (Just <$> parseTopLevel) <|> emptyLine
 
 ifStmt :: Parser Stmt
@@ -473,10 +474,10 @@ ifStmt = do
   ss2 <- choice [elseLine *> nonEndIfTopLevels <* endIfLine
                 ,endIfLine *> pure []]
   return (IfStmt p ss1 ss2)
-  where elseLine = chunk "else" *> eatLine
-        endIfLine = chunk "endif" *> eatLine
-        nonElseEndIfTopLevels = guardedTopLevel ((chunk "else" <|> chunk "endif") *> eatLine)
-        nonEndIfTopLevels = guardedTopLevel (chunk "endif" *> eatLine)
+  where elseLine = expSpaces *> chunk "else" *> eatLine
+        endIfLine = expSpaces *> chunk "endif" *> eatLine
+        nonElseEndIfTopLevels = guardedTopLevel (expSpaces *> (chunk "else" <|> chunk "endif") *> eatLine)
+        nonEndIfTopLevels = guardedTopLevel (expSpaces *> chunk "endif" *> eatLine)
 
 decl :: Bool -> Parser TopLevel
 decl override = parseLWord >>= lwordCont
