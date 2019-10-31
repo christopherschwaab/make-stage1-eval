@@ -224,10 +224,11 @@ evalStmt (IfStmt pred ss1 ss2) = do
 
 -- FIXME double check the order things get evaluated here
 evalRule :: Rule -> Interpreter ()
-evalRule (Rule t d (Recipe es)) = do
-  Value target <- evalExp t
+evalRule (Rule ts d (Recipe es)) = do
+  vts <- mapM (fmap fromValue . evalExp) ts
   deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
-  modify (\st -> st{targets = Map.insert target (deps, es) (targets st)}) -- FIXME think make dies on  double defined targets? (except ::)
+  modify (\st -> st{targets = foldr (addTarget deps) (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
+  where addTarget deps t m = Map.insert t (deps, es) m
 
 evalTopLevel :: TopLevel -> Interpreter ()
 evalTopLevel (Stmt s) = evalStmt s
@@ -353,30 +354,52 @@ expectLineContinuation :: Char -> Parser ()
 expectLineContinuation '\\' = pure ()
 expectLineContinuation _ = fail "Newlines in rule identifiers must be escaped by a backslash \\."
 
-data LWord = LRuleOrVarDecl Exp | LVarDecl Exp Binder | LRuleDecl Exp | LExp Exp
+data LWord = LVarDecl Exp Binder | LRuleDecl [Exp] | LExp Exp
   deriving (Eq, Show)
 
--- This seems to basically accept anything (including strange unicode space
--- chars) except ascii space, newline, tab, and carriage return.
-lword :: Exp -> Parser LWord
-lword acc = do
-  l <- option "" (litExp " " ['=', ' ', '\t'])
-  let name = acc `catr` l
-  choice [oneOf [' ', '\t'] *> pure (LRuleOrVarDecl name)
-         ,char ':' *> (immDecl name <|> pure (LRuleDecl name))
-         ,char '=' *> pure (uncurry LVarDecl (varDecl acc l))
-         ,char '$' *> dollarExp >>= \e -> lword (name `cat` e)]
-  where immDecl name = char '=' *> pure (LVarDecl name ImmediateBinder)
-        varDecl acc l = case T.last l of
-                          '?' -> (acc `catr` T.init l, DefaultValueBinder)
-                          '!' -> (acc `catr` T.init l, ShellBinder)
-                          '+' -> (acc `catr` T.init l, AppendBinder)
-                          _   -> (acc `catr` l, DeferredBinder)
-{-# INLINE lword #-}
+-- FIXME This is a mess.
+--moreLWord :: [Exp] -> Parser LWord
+--moreLWord es = lword =<< (:es) <$> (lexp <* expSpaces) where
+--  lexp = choice [Lit . T.concat <$> llits
+--                ,char '$' *> dollarExp]
+--  llitExp = litExp " " [' ', '?', '!', '+', '=', '\t']
+--  llits = (:) <$> llitExp
+--              <*> many (do notFollowedBy binder
+--                           append <$> fmap T.singleton (oneOf ['?', '!', '+']) <*> option "" llitExp)
+
+--lword :: [Exp] -> Parser LWord
+--lword es = choice [LVarDecl <$> projectVarName es <*> binder
+--                  ,LRuleDecl es <$ char ':'
+--                  ,moreLWord es <|> (LExp <$> projectExp es)]
+--  where projectVarName = projectHead "variable name without space literals"
+--        projectExp = projectHead "single top-level expression"
+--        projectHead msg es = do (guard (length es == 1) <?> msg)
+--                                return (head es)
+--{-# INLINE lword #-}
+
+llit :: Parser Text
+llit = T.concat <$> some (binderChar <|> litExp " " [' ', '\t', '?', '!', '+', '='])
+  where binderChar = notFollowedBy binder *> (T.singleton <$> oneOf ['?', '!', '+'])
+
+lexp :: Parser Exp
+lexp = choice [Lit <$> llit
+              ,char '$' *> dollarExp]
+
+lword :: [Exp] -> Parser LWord
+lword es = do e <- foldr1 cat <$> some lexp
+              expSpaces
+              choice [LVarDecl <$> projectVarName (e:es) <*> binder -- FIXME die if es is non-empty
+                     ,LRuleDecl (e:es) <$ char ':'
+                     ,lword (e:es)
+                     ,LExp <$> projectExp (e:es)]
+  where projectVarName = projectHead "a variable name without spaces"
+        projectExp = projectHead "a single top-level expression"
+        projectHead :: String -> [Exp] -> Parser Exp
+        projectHead msg es = do (guard (length es == 1) <?> msg)
+                                return (head es)
 
 parseLWord :: Parser LWord
-parseLWord = lword (Lit "")
-{-# INLINE parseLWord #-}
+parseLWord = lword []
 
 optionalStmtInnerExp :: [Char] -> Parser Exp
 optionalStmtInnerExp = option (Lit "") . stmtInnerExp
@@ -404,29 +427,31 @@ expVarArgs tchars = optionalStmtInnerExp (',':tchars) `sepBy` char ','
 collapseContLines :: Parser a -> Parser (NonEmpty a)
 collapseContLines p = (:|) <$> p <*> many (lineContinuation *> p)
 
+binder :: Parser Binder
+binder = choice [char '='   *> pure DeferredBinder
+                ,chunk ":=" *> pure ImmediateBinder
+                ,chunk "!=" *> pure ShellBinder
+                ,chunk "?=" *> pure DefaultValueBinder
+                ,chunk "+=" *> pure AppendBinder]
+
 parseBinding :: Bool -> Exp -> Parser Stmt
-parseBinding override e = binder <* expSpaces <*> pure e <*> option (Lit "") rexp
-  where binder :: Parser (Exp -> Exp -> Stmt)
-        binder = choice [char '='   *> pure (Bind override DeferredBinder)
-                        ,chunk ":=" *> pure (Bind override ImmediateBinder)
-                        ,chunk "!=" *> pure (Bind override ShellBinder)
-                        ,chunk "+=" *> pure (Bind override AppendBinder)]
+parseBinding override e = Bind override <$> (binder <* expSpaces) <*> pure e <*> option (Lit "") rexp
 
 expSpaces :: Parser Text
 expSpaces = foldr1 (\s1 s2 -> s1 `append` " " `append` s2) <$> collapseContLines spaces
   where spaces :: Parser Text
         spaces = takeWhileP (Just "space") (`elem` [' ', '\t'])
 
-parseRule :: Exp -> Parser Rule
-parseRule e = Rule e <$> (optional parseDependencies <* eol) <*> parseRecipe
+parseRule :: [Exp] -> Parser Rule
+parseRule es = Rule es <$> (optional parseDependencies <* eol) <*> parseRecipe
 
 -- FIXME double-colon rules?
-parseRuleOrVarDecl :: Bool -> Exp -> Parser TopLevel
-parseRuleOrVarDecl override e = do
-  lspaces <- expSpaces
-  choice [Stmt <$> parseBinding override e
-         ,RuleDecl <$> (char ':' *> parseRule ruleName)]
-  where ruleName = if override then "override " `catl` e else e
+--parseRuleOrVarDecl :: Bool -> Exp -> Parser TopLevel
+--parseRuleOrVarDecl override e = do
+--  lspaces <- expSpaces
+--  choice [Stmt <$> parseBinding override e
+--         ,RuleDecl <$> (char ':' *> parseRule ruleName)]
+--  where ruleName = if override then "override " `catl` e else e
 
 -- FIXME when does evaluation occur here?
 parseDependencies :: Parser Exp
@@ -448,7 +473,7 @@ parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> blankLine)
   where blankLine = recipeLineLeadingWhite *> emptyLine
 
 includeExp :: Parser Exp
-includeExp = try (chunk "include" *> expSpaces) *> rexp
+includeExp = try (chunk "include" *> expSpaces *> rexp <* (void (char '\n') <|> eof))
 
 eatLine :: Parser ()
 eatLine = void (expSpaces >> emptyLine)
@@ -479,16 +504,17 @@ ifStmt = do
         nonElseEndIfTopLevels = guardedTopLevel (expSpaces *> (chunk "else" <|> chunk "endif") *> eatLine)
         nonEndIfTopLevels = guardedTopLevel (expSpaces *> chunk "endif" *> eatLine)
 
+-- FIXME add export
 decl :: Bool -> Parser TopLevel
-decl override = parseLWord >>= lwordCont
-  where lwordCont :: LWord -> Parser TopLevel
-        lwordCont (LRuleOrVarDecl e) = parseRuleOrVarDecl override e
-        lwordCont (LVarDecl e b) = Stmt . Bind override b e <$> (expSpaces *> option (Lit "") rexp)
-        lwordCont (LRuleDecl e) = let ruleName = if override then ("override " `catl` e) else e
-                                  in RuleDecl <$> parseRule ruleName
-        lwordCont (LExp e) = pure (Stmt (SExp e))
+decl override = do
+  l <- parseLWord
+  case l of
+    LVarDecl e b -> Stmt . Bind override b e <$> (expSpaces *> option (Lit "") rexp)
+    LRuleDecl es -> RuleDecl <$> parseRule (if override then Lit "override":es else es)
+    LExp e -> return (Stmt (SExp e))
 
 -- FIXME double-colon rules?
+-- FIXME Factor into directive <|> decl.
 -- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
 parseTopLevel :: Parser TopLevel
 parseTopLevel = choice [Include <$> includeExp

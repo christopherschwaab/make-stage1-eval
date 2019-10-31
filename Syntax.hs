@@ -108,7 +108,7 @@ newtype Recipe = Recipe [Exp]
   deriving (Eq, Show)
 data RuleExp = RExp Exp | RBind Exp Exp
   deriving (Eq, Show)
-data Rule = Rule Exp (Maybe Exp) Recipe -- FIXME add locally bound variables to deps
+data Rule = Rule [Exp] (Maybe Exp) Recipe -- FIXME add locally bound variables to deps
   deriving (Eq, Show)
 data TopLevel = Stmt Stmt
               | RuleDecl Rule
@@ -177,7 +177,11 @@ prettyRuleExp (RExp e) = prettyExp e
 prettyRuleExp (RBind e1 e2) = T.concat [prettyExp e1, "=", prettyExp e2]
 
 prettyRule :: Rule -> Text
-prettyRule (Rule e mdeps r) = prettyExp e `append` ":" `append` prettyDeps mdeps `append` "\n" `append` prettyRecipe r
+prettyRule (Rule es mdeps r) = T.concat [T.intercalate " " (map prettyExp es)
+                                        ,":"
+                                        ,prettyDeps mdeps
+                                        ,"\n"
+                                        ,prettyRecipe r]
   where prettyDeps (Just deps) = " " `append` prettyExp deps
         prettyDeps Nothing = ""
 

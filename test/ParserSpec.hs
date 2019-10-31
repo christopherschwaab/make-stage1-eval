@@ -81,20 +81,20 @@ and more|]
 
     it "differentiates unambiguous rule and variable declarations" $ do
       parse parseLWord "" "xvar:=" `shouldParse` LVarDecl (Lit "xvar") ImmediateBinder
-      parse parseLWord "" "xrule:" `shouldParse` LRuleDecl (Lit "xrule")
+      parse parseLWord "" "xrule:" `shouldParse` LRuleDecl [Lit "xrule"]
 
     it "supports unusual characters in rule names" $ do
-      parse parseLWord "" "!rule:" `shouldParse` LRuleDecl (Lit "!rule")
-      parse parseLWord "" "a?!rule.:" `shouldParse` LRuleDecl (Lit "a?!rule.")
+      parse parseLWord "" "!rule:" `shouldParse` LRuleDecl [Lit "!rule"]
+      parse parseLWord "" "a?!rule.:" `shouldParse` LRuleDecl [Lit "a?!rule."]
 
     it "supports backslashes in names" $ do
       parse parseLWord "" "\\xvar:=" `shouldParse` LVarDecl (Lit "\\xvar") ImmediateBinder
       parse parseLWord "" "a\\decl?=" `shouldParse` LVarDecl (Lit "a\\decl") DefaultValueBinder
-      parse parseLWord "" "xrule\\:" `shouldParse` LRuleDecl (Lit "xrule\\")
+      parse parseLWord "" "xrule\\:" `shouldParse` LRuleDecl [Lit "xrule\\"]
 
-    it "stops at spaces" $ do
-      parse parseLWord "" "xrule\\  :" `shouldParse` LRuleOrVarDecl (Lit "xrule\\")
-      parse parseLWord "" "xvar\\  :=" `shouldParse` LRuleOrVarDecl (Lit "xvar\\")
+    it "consumes trailing spaces" $ do
+      parse parseLWord "" "xrule\\  :" `shouldParse` LRuleDecl [Lit "xrule\\"]
+      parse parseLWord "" "xvar\\  :=" `shouldParse` LVarDecl (Lit "xvar\\") ImmediateBinder
 
     it "stops at =" $ do
       parse parseLWord "" "xvar=" `shouldParse` LVarDecl (Lit "xvar") DeferredBinder
@@ -271,7 +271,14 @@ test:
 	echo doing all with deps t1 and t2
 |]
 
-      parse makefile "" basic `shouldParse` [RuleDecl (Rule (Lit "all") Nothing (Recipe [Lit "echo all target called"]))]
-      parse makefile "" multiTarget `shouldParse` [RuleDecl (Rule (Lit "all") Nothing (Recipe [Lit "echo all target called"]))
-                                                  ,RuleDecl (Rule (Lit "test") Nothing (Recipe [Lit "echo doing test target"]))]
-      parse makefile "" deps `shouldParse` [RuleDecl (Rule (Lit "all") (Just (Lit " t1 t2")) (Recipe [Lit "echo doing all with deps t1 and t2"]))]
+      parse makefile "" basic `shouldParse` [RuleDecl (Rule [Lit "all"] Nothing (Recipe [Lit "echo all target called"]))]
+      parse makefile "" multiTarget `shouldParse` [RuleDecl (Rule [Lit "all"] Nothing (Recipe [Lit "echo all target called"]))
+                                                  ,RuleDecl (Rule [Lit "test"] Nothing (Recipe [Lit "echo doing test target"]))]
+      parse makefile "" deps `shouldParse` [RuleDecl (Rule [Lit "all"] (Just (Lit " t1 t2")) (Recipe [Lit "echo doing all with deps t1 and t2"]))]
+
+    it "accepts multiple binders" $ do
+      let twoBinds = [r|x0=true
+      x1 += more_x1_value
+|]
+      parse makefile "" twoBinds `shouldParse`
+        []
