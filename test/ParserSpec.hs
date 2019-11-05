@@ -68,6 +68,11 @@ and more|]
       parse rexp "" "$(shell find -regex '.*\\.\\(cpp\\|qrc\\)' )" `shouldParse`
         (Builtin (PApp (App Shell (Lit "find -regex '.*\\.\\(cpp\\|qrc\\)' "))))
 
+    it "accepts colons in calls" $ do
+      let cexp = [r|$(shell perl -MList::Util=max -ape 's/$$/" " . max(@F)/e unless $$.==$(VAL)')|]
+      parse rexp "" cexp `shouldParse`
+        (Builtin (PApp (App Shell (Lit "perl -MList::Util=max -ape 's/$/\" \" . max" `Cat` Lit "(@F)" `Cat` Lit "/e unless $.==" `Cat` Var (Lit "VAL") `Cat` Lit "'"))))
+
   describe "parseLWord" $ do
     it "matches ambiguous leading binder characters in variable names" $ do
       parse parseLWord "" "xvar!??=" `shouldParse` LVarDecl (Lit "xvar!?") DefaultValueBinder

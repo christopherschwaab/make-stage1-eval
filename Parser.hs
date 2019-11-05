@@ -270,10 +270,10 @@ escaped nl = choice [char '#'   *> pure "#"
 
 litExp :: Text -> [Char] -> Parser Text
 litExp nl tchars = foldr1 append <$> some (do
-  let nonLitChar = ['\\', '$', '\n', '#', ':'] ++ tchars
+  let nonLitChar = ['\\', '$', '\n', '#'] ++ tchars
   l <- takeWhileP (Just "literal character") (\c -> not (c `elem` nonLitChar))
   choice [l `append` nl <$ try lineContinuation
-         ,"$" <$ chunk "$$"
+         ,l `append` "$" <$ chunk "$$"
          ,append l <$> (char '\\' *> option "\\" (escaped nl))
          ,l <$ guard (not (T.null l))])
 
@@ -335,8 +335,8 @@ stmtInnerExp = innerExp " "
 recipeInnerExp = innerExp "\n"
 
 dollarExp :: Parser Exp
-dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> stmtInnerExp [')'])
-                   ,braces (builtinCall '}' <|> builtinOrVar <$> stmtInnerExp ['}'])
+dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> stmtInnerExp [':', ')'])
+                   ,braces (builtinCall '}' <|> builtinOrVar <$> stmtInnerExp [':', '}'])
                    ,Var . Lit <$> singleCharVar]
   where singleCharVar = (char '\\' *> escaped " ")
                     <|> option "" (T.singleton <$> anySingleBut '\n')
@@ -378,7 +378,7 @@ data LWord = LVarDecl Exp Binder | LRuleDecl [Exp] | LExp Exp
 --{-# INLINE lword #-}
 
 llit :: Parser Text
-llit = T.concat <$> some (binderChar <|> litExp " " [' ', '\t', '?', '!', '+', '='])
+llit = T.concat <$> some (binderChar <|> litExp " " [' ', '\t', '?', '!', '+', '=', ':'])
   where binderChar = notFollowedBy binder *> (T.singleton <$> oneOf ['?', '!', '+'])
 
 lexp :: Parser Exp
@@ -457,6 +457,7 @@ recipeLineLeadingWhite :: Parser ()
 recipeLineLeadingWhite = void (collapseContLines leadingWhite)
   where leadingWhite = takeWhileP (Just "recipe leading whitespace") (`elem` [' ', '\t'])
 
+-- FIXME recipes can have directives inside them
 recipeLine :: Parser (Maybe Exp)
 recipeLine = char '\t' *> recipeLineLeadingWhite *> (nonEmptyRecipeLine <|> emptyLine)
   where nonEmptyRecipeLine = Just <$> recipeInnerExp []
@@ -466,7 +467,7 @@ parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> try blankLine)
   where blankLine = recipeLineLeadingWhite *> emptyLine
 
 includeExp :: Parser Exp
-includeExp = try (chunk "include" *> expSpaces *> rexp <* (void (char '\n') <|> eof))
+includeExp = try (chunk "include" *> expSpaces *> rexp <* eatLine)
 
 eatLine :: Parser ()
 eatLine = expSpaces >> try (void emptyLine <|> eof)
