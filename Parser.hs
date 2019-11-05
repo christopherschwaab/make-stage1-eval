@@ -445,20 +445,13 @@ expSpaces = foldr1 (\s1 s2 -> s1 `append` " " `append` s2) <$> collapseContLines
 parseRule :: [Exp] -> Parser Rule
 parseRule es = Rule es <$> (optional parseDependencies <* eol) <*> parseRecipe
 
--- FIXME double-colon rules?
---parseRuleOrVarDecl :: Bool -> Exp -> Parser TopLevel
---parseRuleOrVarDecl override e = do
---  lspaces <- expSpaces
---  choice [Stmt <$> parseBinding override e
---         ,RuleDecl <$> (char ':' *> parseRule ruleName)]
---  where ruleName = if override then "override " `catl` e else e
-
 -- FIXME when does evaluation occur here?
 parseDependencies :: Parser Exp
 parseDependencies = rexp
 
 emptyLine :: Parser (Maybe a)
-emptyLine = Nothing <$ (void eol <|> skipLineComment "#" <* option () (void eol))
+emptyLine = Nothing <$ choice [void eol
+                              ,skipLineComment "#" <* option () (void eol)]
 
 recipeLineLeadingWhite :: Parser ()
 recipeLineLeadingWhite = void (collapseContLines leadingWhite)
@@ -469,14 +462,14 @@ recipeLine = char '\t' *> recipeLineLeadingWhite *> (nonEmptyRecipeLine <|> empt
   where nonEmptyRecipeLine = Just <$> recipeInnerExp []
 
 parseRecipe :: Parser Recipe
-parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> blankLine)
+parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> try blankLine)
   where blankLine = recipeLineLeadingWhite *> emptyLine
 
 includeExp :: Parser Exp
 includeExp = try (chunk "include" *> expSpaces *> rexp <* (void (char '\n') <|> eof))
 
 eatLine :: Parser ()
-eatLine = void (expSpaces >> emptyLine)
+eatLine = expSpaces >> try (void emptyLine <|> eof)
 
 ifPred :: Parser IfPred
 ifPred = unaryIfPred <|> binIfPred
@@ -490,17 +483,17 @@ ifPred = unaryIfPred <|> binIfPred
 
 guardedTopLevel :: Parser a -> Parser Program
 guardedTopLevel p = catMaybes <$> many (notFollowedBy p *> expSpaces *> topLevel)
-  where topLevel = (Just <$> parseTopLevel) <|> emptyLine
+  where topLevel = (Just <$> parseTopLevel) <|> try emptyLine
 
 ifStmt :: Parser Stmt
 ifStmt = do
   p <- ifPred
   ss1 <- nonElseEndIfTopLevels
-  ss2 <- choice [elseLine *> nonEndIfTopLevels <* endIfLine
-                ,endIfLine *> pure []]
+  ss2 <- expSpaces *> choice [elseLine *> nonEndIfTopLevels <* expSpaces <* endIfLine
+                             ,endIfLine *> pure []]
   return (IfStmt p ss1 ss2)
-  where elseLine = expSpaces *> chunk "else" *> eatLine
-        endIfLine = expSpaces *> chunk "endif" *> eatLine
+  where elseLine = chunk "else" *> eatLine
+        endIfLine = chunk "endif" *> eatLine
         nonElseEndIfTopLevels = guardedTopLevel (expSpaces *> (chunk "else" <|> chunk "endif") *> eatLine)
         nonEndIfTopLevels = guardedTopLevel (expSpaces *> chunk "endif" *> eatLine)
 
@@ -517,11 +510,11 @@ decl override = do
 -- FIXME Factor into directive <|> decl.
 -- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
 parseTopLevel :: Parser TopLevel
-parseTopLevel = choice [Include <$> includeExp
-                       ,Stmt <$> ifStmt
-                       ,override
-                       ,decl False]
+parseTopLevel = expSpaces *> choice [Include <$> includeExp
+                                    ,Stmt <$> ifStmt
+                                    ,override
+                                    ,decl False]
   where override = expSpaces *> chunk "override" *> expSpaces *> decl True
 
 makefile :: Parser Program
-makefile = catMaybes <$> many ((Just <$> parseTopLevel) <|> emptyLine)
+makefile = catMaybes <$> many ((Just <$> parseTopLevel) <|> try emptyLine)

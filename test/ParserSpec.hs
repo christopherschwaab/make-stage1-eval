@@ -149,17 +149,20 @@ with a newline in it|]
     it "parses variable-named variable-binding" $ do
       parse parseTopLevel "" "$(backslash) = backslash_value" `shouldParse` Stmt (Bind False DeferredBinder (Var (Lit "backslash")) (Lit "backslash_value"))
 
-    --it "supportes standalone expressions" $ do
-    --  parse parseTopLevel "" "$(if $(filter-out none,$(PRODUCT)),,$(error Unable to determine the target product))" `shouldParse`
-    --    Stmt (SExp (Lit ("")))
+    it "supportes standalone expressions" $ do
+      parse parseTopLevel "" "$(if $(filter-out none,$(PRODUCT)),,$(error Unable to determine the target product))" `shouldParse`
+        (Stmt (SExp (Builtin
+                     (PApp (App If
+                            (Builtin (PApp (App FilterOut
+                                            (Lit "none",Var (Lit "PRODUCT"))))
+                            ,Lit ""
+                            ,Just (Builtin (PApp (App Error
+                                                  (Lit "Unable to determine the target product"))))))))))
 
-  describe "ifStmt" $ do
-    it "parses basic if" $ do
-      let ifEq11 = [r|ifeq (1,1)
-	x = ok
-endif
-|]
-      parse ifStmt "" ifEq11 `shouldParse` IfStmt (EqPred (Lit "1") (Lit "1")) [Stmt (Bind False DeferredBinder (Lit "x") (Lit "ok"))] []
+      parse parseTopLevel "" [r|$(error Empty "$(EMPTY)" isn't empty.)|] `shouldParse`
+        (Stmt (SExp (Builtin (PApp
+                              (App Error
+                               (Lit "Empty \"" `Cat` (Var (Lit "EMPTY") `Cat` Lit "\" isn't empty.")))))))
 
       let ifNeqMultiLine = [r|ifneq (x x,x y)
 	x = ok line  1  
@@ -256,6 +259,87 @@ else
       parse ifStmt "" `shouldFailOn` openIf
       parse ifStmt "" `shouldFailOn` openElse
 
+    it "accepts standalone expressions" $ do
+     let nakedError = [r|ifneq ($(EMPTY),)
+      $(error Empty "$(EMPTY)" isn't empty.)
+endif
+|]
+     parse ifStmt "" nakedError `shouldParse`
+       IfStmt (NeqPred (Var (Lit "EMPTY")) (Lit ""))
+              [Stmt (SExp (Builtin (PApp
+                                    (App Error (Lit "Empty \"" `Cat` (Var (Lit "EMPTY") `Cat` Lit "\" isn't empty."))))))]
+              []
+
+    it "allows indented else and endif" $ do
+     let indentedEndIf = [r|ifneq (42,6*7)
+      x = 42
+    endif
+|]
+     parse ifStmt "" indentedEndIf `shouldParse`
+       IfStmt (NeqPred (Lit "42") (Lit "6*7"))
+              [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
+              []
+
+     let indentedElse = [r|ifneq (42,6*7)
+      x = 42
+    else
+      x = 6*7
+endif
+|]
+     parse ifStmt "" indentedElse `shouldParse`
+       IfStmt (NeqPred (Lit "42") (Lit "6*7"))
+              [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
+              [Stmt (Bind False DeferredBinder (Lit "x") (Lit "6*7"))]
+
+     let indentedBoth = [r|ifeq (iec61508,b26262)
+         so = oh
+    else
+       oh = so
+  endif
+|]
+     parse ifStmt "" indentedBoth `shouldParse`
+       IfStmt (EqPred (Lit "iec61508") (Lit "b26262"))
+              [Stmt (Bind False DeferredBinder (Lit "so") (Lit "oh"))]
+              [Stmt (Bind False DeferredBinder (Lit "oh") (Lit "so"))]
+
+    it "accepts nested ifs" $ do
+     let nestedIf = [r|ifneq (42,6*7)
+      ifeq (6*7,42)
+       $(info huh)
+    else
+       $(info oh)
+       # dang
+  endif
+    endif
+|]
+     parse ifStmt "" nestedIf `shouldParse`
+       IfStmt (NeqPred (Lit "42") (Lit "6*7"))
+              [Stmt (IfStmt (EqPred (Lit "6*7") (Lit "42"))
+                     [Stmt (SExp (Builtin (PApp (App Info (Lit "huh")))))]
+                     [Stmt (SExp (Builtin (PApp (App Info (Lit "oh")))))])]
+              []
+
+    it "accepts rules" $ do
+     let ruleIf = [r|ifneq ($(SRCDIR),src)
+      all:
+	cd src && make -B
+   else
+ all:
+	cd not-src; make -B
+
+  endif
+    endif
+|]
+     parse ifStmt "" ruleIf `shouldParse`
+       IfStmt (NeqPred (Var (Lit "SRCDIR")) (Lit "src"))
+              [RuleDecl (Rule [Lit "all"]
+                              Nothing
+                              (Recipe [Lit "cd src && make -B"]))]
+              [RuleDecl (Rule [Lit "all"]
+                              Nothing
+                              (Recipe [Lit "cd not-src; make -B"]))]
+
+
   describe "makefile" $ do
     it "parses basic makefiles" $ do
       let basic = [r|all:
@@ -280,5 +364,5 @@ test:
       let twoBinds = [r|x0=true
       x1 += more_x1_value
 |]
-      parse makefile "" twoBinds `shouldParse`
-        []
+      parse makefile "" twoBinds `shouldParse` [Stmt (Bind False DeferredBinder (Lit "x0") (Lit "true"))
+                                               ,Stmt (Bind False AppendBinder (Lit "x1") (Lit "more_x1_value"))]
