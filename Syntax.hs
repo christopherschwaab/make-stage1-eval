@@ -10,7 +10,7 @@ data Builtin sh where
   Foreach    :: Builtin (Exp, Exp, Exp) -- Collapses whitespace
   Filter     :: Builtin (Exp, Exp)-- collapses whitespace?
   FilterOut  :: Builtin (Exp, Exp) -- collapses whitespace?
-  If         :: Builtin (Exp, Exp, Maybe Exp) -- collapses whitespace?
+  IfExp      :: Builtin (Exp, Exp, Maybe Exp) -- collapses whitespace?
   And        :: Builtin [Exp] -- collapses whitespace?
   Shell      :: Builtin Exp -- Collapses whitespace
   Wildcard   :: Builtin Exp
@@ -39,7 +39,7 @@ instance Eq PAppliedBuiltin where
   PApp (App Foreach   x) == PApp (App Foreach   y) = x == y
   PApp (App Filter    x) == PApp (App Filter    y) = x == y
   PApp (App FilterOut x) == PApp (App FilterOut y) = x == y
-  PApp (App If        x) == PApp (App If        y) = x == y
+  PApp (App IfExp     x) == PApp (App IfExp     y) = x == y
   PApp (App And       x) == PApp (App And       y) = x == y
   PApp (App Shell     x) == PApp (App Shell     y) = x == y
   PApp (App Wildcard  x) == PApp (App Wildcard  y) = x == y
@@ -59,7 +59,7 @@ instance Show PAppliedBuiltin where
   show (PApp a@(App Foreach   x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App Filter    x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App FilterOut x)) = "(PApp (" ++ show a ++ "))"
-  show (PApp a@(App If        x)) = "(PApp (" ++ show a ++ "))"
+  show (PApp a@(App IfExp     x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App And       x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App Shell     x)) = "(PApp (" ++ show a ++ "))"
   show (PApp a@(App Wildcard  x)) = "(PApp (" ++ show a ++ "))"
@@ -100,8 +100,11 @@ data IfPred
   deriving (Eq, Show)
 data Stmt
   = Bind Bool Binder Exp Exp
-  | IfStmt IfPred [TopLevel] [TopLevel]
   | SExp Exp
+  deriving (Eq, Show)
+data Directive = Include Exp
+               | If IfPred [TopLevel] [TopLevel]
+               | VPath (Maybe (Either Exp (Exp, Exp)))
   deriving (Eq, Show)
 
 newtype Recipe = Recipe [Exp]
@@ -112,7 +115,7 @@ data Rule = Rule [Exp] (Maybe Exp) Recipe -- FIXME add locally bound variables t
   deriving (Eq, Show)
 data TopLevel = Stmt Stmt
               | RuleDecl Rule
-              | Include Exp
+              | Directive Directive
   deriving (Eq, Show)
 
 type Program = [TopLevel]
@@ -139,7 +142,7 @@ prettyPApp :: PAppliedBuiltin -> Text
 prettyPApp (PApp (App Foreach   x)) = "foreach " `append` prettyAppExp x
 prettyPApp (PApp (App Filter    x)) = "filter " `append` prettyAppExp x
 prettyPApp (PApp (App FilterOut x)) = "filter-out " `append` prettyAppExp x
-prettyPApp (PApp (App If        x)) = "if " `append` prettyAppExp x
+prettyPApp (PApp (App IfExp     x)) = "if " `append` prettyAppExp x
 prettyPApp (PApp (App And       x)) = "and " `append` prettyAppExp x
 prettyPApp (PApp (App Shell     x)) = "shell " `append` prettyAppExp x
 prettyPApp (PApp (App Wildcard  x)) = "wildcard " `append` prettyAppExp x
@@ -194,7 +197,13 @@ prettyStmt (Bind override b e1 e2) =
   in if override then "override " `append` t
        else t
 prettyStmt (SExp e) = prettyExp e
-prettyStmt (IfStmt p ss1 ss2) =
+
+prettyDirective :: Directive -> Text
+prettyDirective (Include e) = "include " `append` prettyExp e
+prettyDirective (VPath Nothing) = "vpath"
+prettyDirective (VPath (Just (Left e))) = "vpath " `append` prettyExp e
+prettyDirective (VPath (Just (Right (e1, e2)))) = "vpath " `append` prettyExp e1 `append` prettyExp e2
+prettyDirective (If p ss1 ss2) =
   let prettySs1 = T.intercalate "\n\t" (map prettyTopLevel ss1)
       prettyPred = prettyIfPred p
   in if null ss2
@@ -210,7 +219,7 @@ prettyStmt (IfStmt p ss1 ss2) =
 prettyTopLevel :: TopLevel -> Text
 prettyTopLevel (Stmt s) = prettyStmt s
 prettyTopLevel (RuleDecl r) = T.concat ["\n", prettyRule r, "\n"]
-prettyTopLevel (Include e) = "include " `append` prettyExp e
+prettyTopLevel (Directive d) = prettyDirective d
 
 prettyProgram :: Program -> Text
 prettyProgram ts = T.intercalate "\n" (map prettyTopLevel ts)

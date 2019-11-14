@@ -16,6 +16,7 @@ import Data.Maybe (catMaybes, isJust, isNothing)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text, append, intercalate, pack, uncons, unpack)
 import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import qualified Data.Text.Read as TR
 import Data.Traversable (sequence)
 import Data.Void (Void)
@@ -129,9 +130,9 @@ evalBuiltin FilterOut (e1, e2) = do
   ws <- splitFields . fromValue <$> evalExp e2
   let ws' = filter (\w -> any isNothing (map (\p -> matchPat p w) pat)) ws
   return (Value (intercalate " " ws'))
-evalBuiltin If (e1, e2, e3) = do Value p <- evalExp e1
-                                 if T.null p then evalExp e2
-                                   else maybe (pure (Value "")) evalExp e3
+evalBuiltin IfExp (e1, e2, e3) = do Value p <- evalExp e1
+                                    if T.null p then evalExp e2
+                                      else maybe (pure (Value "")) evalExp e3
 evalBuiltin And es = evalAnd "" es where
   evalAnd r (e:es) = do Value v <- evalExp e
                         if T.null v then return (Value "")
@@ -213,7 +214,17 @@ evalStmt (Bind override b e1 e2) = do -- FIXME override
         Nothing -> undefined -- what does make do in this case?
       put (st{env=p'})
 evalStmt (SExp e) = () <$ evalExp e
-evalStmt (IfStmt pred ss1 ss2) = do
+
+evalDirective :: Directive -> Interpreter ()
+evalDirective (Include e) = do f <- unpack . fromValue <$> evalExp e
+                               r <- liftIO (parse makefile f <$> TIO.readFile f)
+                               case r of
+                                 Left err -> error (errorBundlePretty err)
+                                 Right p -> evalProgram p
+evalDirective (VPath Nothing) = undefined -- FIXME
+evalDirective (VPath (Just (Left e))) = undefined -- FIXME
+evalDirective (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
+evalDirective (If pred ss1 ss2) = do
   b <- evalIfPred pred
   if b then mapM_ evalTopLevel ss1
     else mapM_ evalTopLevel ss2
@@ -232,10 +243,14 @@ evalRule (Rule ts d (Recipe es)) = do
 
 evalTopLevel :: TopLevel -> Interpreter ()
 evalTopLevel (Stmt s) = evalStmt s
+evalTopLevel (Directive d) = evalDirective d
 evalTopLevel (RuleDecl r) = evalRule r
 
+evalProgram :: Program -> Interpreter ()
+evalProgram = mapM_ evalTopLevel
+
 run :: Program -> IO EvalState
-run p = execStateT (mapM_ evalTopLevel p) (EvalState{env=Map.empty, targets=Map.empty})
+run p = execStateT (evalProgram p) (EvalState{env=Map.empty, targets=Map.empty})
 
 cat :: Exp -> Exp -> Exp
 cat (Lit t1) (Lit t2)
@@ -302,7 +317,7 @@ builtin tchars = choice builtins where
   builtins = [reserved "foreach" >> PApp . App Foreach <$> parseBuiltinArgs tchars
              ,reserved "filter" >> PApp . App Filter <$> parseBuiltinArgs tchars
              ,reserved "filter-out" >> PApp . App FilterOut <$> parseBuiltinArgs tchars
-             ,reserved "if" >> PApp . App If <$> ifArgs tchars
+             ,reserved "if" >> PApp . App IfExp <$> ifArgs tchars
              ,reserved "and" >> PApp . App And <$> parseBuiltinArgs tchars
              ,reserved "shell" >> PApp . App Shell <$> parseBuiltinArgs tchars
              ,reserved "wildcard" >> PApp . App Wildcard <$> parseBuiltinArgs tchars
@@ -466,8 +481,11 @@ parseRecipe :: Parser Recipe
 parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> try blankLine)
   where blankLine = recipeLineLeadingWhite *> emptyLine
 
-includeExp :: Parser Exp
-includeExp = try (chunk "include" *> expSpaces *> rexp <* eatLine)
+includeDirective :: Parser Directive
+includeDirective = Include <$> try (chunk "include" *> expSpaces *> rexp)
+
+vpathDirective :: Parser Directive
+vpathDirective = Include <$> try (chunk "vpath" *> expSpaces *> rexp)
 
 eatLine :: Parser ()
 eatLine = expSpaces >> try (void emptyLine <|> eof)
@@ -486,13 +504,13 @@ guardedTopLevel :: Parser a -> Parser Program
 guardedTopLevel p = catMaybes <$> many (notFollowedBy p *> expSpaces *> topLevel)
   where topLevel = (Just <$> parseTopLevel) <|> try emptyLine
 
-ifStmt :: Parser Stmt
-ifStmt = do
+ifDirective :: Parser Directive
+ifDirective = do
   p <- ifPred
   ss1 <- nonElseEndIfTopLevels
   ss2 <- expSpaces *> choice [elseLine *> nonEndIfTopLevels <* expSpaces <* endIfLine
                              ,endIfLine *> pure []]
-  return (IfStmt p ss1 ss2)
+  return (If p ss1 ss2)
   where elseLine = chunk "else" *> eatLine
         endIfLine = chunk "endif" *> eatLine
         nonElseEndIfTopLevels = guardedTopLevel (expSpaces *> (chunk "else" <|> chunk "endif") *> eatLine)
@@ -507,12 +525,16 @@ decl override = do
     LRuleDecl es -> RuleDecl <$> parseRule (if override then Lit "override":es else es)
     LExp e -> return (Stmt (SExp e))
 
+directive :: Parser Directive
+directive = choice [ifDirective
+                   ,includeDirective <* eatLine
+                   ,vpathDirective <* eatLine]
+
 -- FIXME double-colon rules?
 -- FIXME Factor into directive <|> decl.
 -- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
 parseTopLevel :: Parser TopLevel
-parseTopLevel = expSpaces *> choice [Include <$> includeExp
-                                    ,Stmt <$> ifStmt
+parseTopLevel = expSpaces *> choice [Directive <$> directive
                                     ,override
                                     ,decl False]
   where override = expSpaces *> chunk "override" *> expSpaces *> decl True

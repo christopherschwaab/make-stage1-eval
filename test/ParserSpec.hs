@@ -157,7 +157,7 @@ with a newline in it|]
     it "supportes standalone expressions" $ do
       parse parseTopLevel "" "$(if $(filter-out none,$(PRODUCT)),,$(error Unable to determine the target product))" `shouldParse`
         (Stmt (SExp (Builtin
-                     (PApp (App If
+                     (PApp (App IfExp
                             (Builtin (PApp (App FilterOut
                                             (Lit "none",Var (Lit "PRODUCT"))))
                             ,Lit ""
@@ -174,10 +174,11 @@ with a newline in it|]
 	x += appending stuff to x 
 endif
 |]
-      parse ifStmt "" ifNeqMultiLine `shouldParse` IfStmt (NeqPred (Lit "x x") (Lit "x y"))
-                                                          [Stmt (Bind False DeferredBinder (Lit "x") (Lit "ok line  1  "))
-                                                          ,Stmt (Bind False AppendBinder (Lit "x") (Lit "appending stuff to x "))]
-                                                          []
+      parse ifDirective "" ifNeqMultiLine `shouldParse`
+        If (NeqPred (Lit "x x") (Lit "x y"))
+           [Stmt (Bind False DeferredBinder (Lit "x") (Lit "ok line  1  "))
+           ,Stmt (Bind False AppendBinder (Lit "x") (Lit "appending stuff to x "))]
+           []
 
     it "parses else blocks" $ do
       let ifEq11 = [r|ifeq (1,1)
@@ -186,9 +187,10 @@ else
 	eq11 = false
 endif
 |]
-      parse ifStmt "" ifEq11 `shouldParse` IfStmt (EqPred (Lit "1") (Lit "1"))
-                                                  [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "true"))]
-                                                  [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "false"))]
+      parse ifDirective "" ifEq11 `shouldParse`
+        If (EqPred (Lit "1") (Lit "1"))
+           [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "true"))]
+           [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "false"))]
 
     it "accepts expressions in test fields" $ do
       let ifEqMultiLine = [r|ifneq (x$(ok),xok_value)
@@ -196,12 +198,12 @@ endif
 	x$(ok) += append $(x$(stuff))
 endif
 |]
-      parse ifStmt "" ifEqMultiLine `shouldParse`
-        IfStmt (NeqPred (Lit "x" `Cat` Var (Lit "ok"))
-                        (Lit "xok_value"))
-               [Stmt (Bind False DeferredBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "ok line  " `Cat` Var (Lit "1") `Cat` Lit "  "))
-               ,Stmt (Bind False AppendBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "append " `Cat` Var (Lit "x" `Cat` Var (Lit "stuff"))))]
-               []
+      parse ifDirective "" ifEqMultiLine `shouldParse`
+        If (NeqPred (Lit "x" `Cat` Var (Lit "ok"))
+                    (Lit "xok_value"))
+           [Stmt (Bind False DeferredBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "ok line  " `Cat` Var (Lit "1") `Cat` Lit "  "))
+           ,Stmt (Bind False AppendBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "append " `Cat` Var (Lit "x" `Cat` Var (Lit "stuff"))))]
+           []
 
     it "accepts empty test fields" $ do
       let emptyField1 = [r|ifneq (,xok_value)
@@ -216,30 +218,30 @@ endif
 	42 = 43
 endif
 |]
-      parse ifStmt "" emptyField1 `shouldParse`
-        IfStmt (NeqPred (Lit "") (Lit "xok_value"))
-               [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
-               []
+      parse ifDirective "" emptyField1 `shouldParse`
+        If (NeqPred (Lit "") (Lit "xok_value"))
+           [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
+           []
 
-      parse ifStmt "" emptyField2 `shouldParse`
-        IfStmt (EqPred (Var (Lit "x")) (Lit ""))
-               [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
-               []
+      parse ifDirective "" emptyField2 `shouldParse`
+        If (EqPred (Var (Lit "x")) (Lit ""))
+           [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
+           []
 
-      parse ifStmt "" bothEmpty `shouldParse`
-        IfStmt (EqPred (Lit "") (Lit ""))
-               [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
-               []
+      parse ifDirective "" bothEmpty `shouldParse`
+        If (EqPred (Lit "") (Lit ""))
+           [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
+           []
 
     it "matches binding of else variable in if block" $ do
       let bindElseInIf = [r|ifeq (1,1)
 	else = this is terrible
 endif
 |]
-      parse ifStmt "" bindElseInIf `shouldParse`
-        IfStmt (EqPred (Lit "1") (Lit "1"))
-               [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
-               []
+      parse ifDirective "" bindElseInIf `shouldParse`
+        If (EqPred (Lit "1") (Lit "1"))
+           [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
+           []
 
       let bindElseInIfWithElse = [r|ifeq (1,1)
 	else = this is terrible
@@ -247,10 +249,10 @@ else
 	else = this is still terrible
 endif
 |]
-      parse ifStmt "" bindElseInIfWithElse `shouldParse`
-        IfStmt (EqPred (Lit "1") (Lit "1"))
-               [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
-               [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is still terrible"))]
+      parse ifDirective "" bindElseInIfWithElse `shouldParse`
+        If (EqPred (Lit "1") (Lit "1"))
+           [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
+           [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is still terrible"))]
 
     it "requires the if block be closed" $ do
       let openIf = [r|ifeq (1,1)
@@ -261,29 +263,29 @@ endif
 else
 	y = unclosed if block
 |]
-      parse ifStmt "" `shouldFailOn` openIf
-      parse ifStmt "" `shouldFailOn` openElse
+      parse ifDirective "" `shouldFailOn` openIf
+      parse ifDirective "" `shouldFailOn` openElse
 
     it "accepts standalone expressions" $ do
      let nakedError = [r|ifneq ($(EMPTY),)
       $(error Empty "$(EMPTY)" isn't empty.)
 endif
 |]
-     parse ifStmt "" nakedError `shouldParse`
-       IfStmt (NeqPred (Var (Lit "EMPTY")) (Lit ""))
-              [Stmt (SExp (Builtin (PApp
-                                    (App Error (Lit "Empty \"" `Cat` (Var (Lit "EMPTY") `Cat` Lit "\" isn't empty."))))))]
-              []
+     parse ifDirective "" nakedError `shouldParse`
+       If (NeqPred (Var (Lit "EMPTY")) (Lit ""))
+          [Stmt (SExp (Builtin (PApp
+                                (App Error (Lit "Empty \"" `Cat` (Var (Lit "EMPTY") `Cat` Lit "\" isn't empty."))))))]
+          []
 
     it "allows indented else and endif" $ do
      let indentedEndIf = [r|ifneq (42,6*7)
       x = 42
     endif
 |]
-     parse ifStmt "" indentedEndIf `shouldParse`
-       IfStmt (NeqPred (Lit "42") (Lit "6*7"))
-              [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
-              []
+     parse ifDirective "" indentedEndIf `shouldParse`
+       If (NeqPred (Lit "42") (Lit "6*7"))
+          [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
+          []
 
      let indentedElse = [r|ifneq (42,6*7)
       x = 42
@@ -291,10 +293,10 @@ endif
       x = 6*7
 endif
 |]
-     parse ifStmt "" indentedElse `shouldParse`
-       IfStmt (NeqPred (Lit "42") (Lit "6*7"))
-              [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
-              [Stmt (Bind False DeferredBinder (Lit "x") (Lit "6*7"))]
+     parse ifDirective "" indentedElse `shouldParse`
+       If (NeqPred (Lit "42") (Lit "6*7"))
+          [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
+          [Stmt (Bind False DeferredBinder (Lit "x") (Lit "6*7"))]
 
      let indentedBoth = [r|ifeq (iec61508,b26262)
          so = oh
@@ -302,10 +304,10 @@ endif
        oh = so
   endif
 |]
-     parse ifStmt "" indentedBoth `shouldParse`
-       IfStmt (EqPred (Lit "iec61508") (Lit "b26262"))
-              [Stmt (Bind False DeferredBinder (Lit "so") (Lit "oh"))]
-              [Stmt (Bind False DeferredBinder (Lit "oh") (Lit "so"))]
+     parse ifDirective "" indentedBoth `shouldParse`
+       If (EqPred (Lit "iec61508") (Lit "b26262"))
+          [Stmt (Bind False DeferredBinder (Lit "so") (Lit "oh"))]
+          [Stmt (Bind False DeferredBinder (Lit "oh") (Lit "so"))]
 
     it "accepts nested ifs" $ do
      let nestedIf = [r|ifneq (42,6*7)
@@ -317,12 +319,12 @@ endif
   endif
     endif
 |]
-     parse ifStmt "" nestedIf `shouldParse`
-       IfStmt (NeqPred (Lit "42") (Lit "6*7"))
-              [Stmt (IfStmt (EqPred (Lit "6*7") (Lit "42"))
-                     [Stmt (SExp (Builtin (PApp (App Info (Lit "huh")))))]
-                     [Stmt (SExp (Builtin (PApp (App Info (Lit "oh")))))])]
-              []
+     parse ifDirective "" nestedIf `shouldParse`
+       If (NeqPred (Lit "42") (Lit "6*7"))
+          [Directive (If (EqPred (Lit "6*7") (Lit "42"))
+                         [Stmt (SExp (Builtin (PApp (App Info (Lit "huh")))))]
+                         [Stmt (SExp (Builtin (PApp (App Info (Lit "oh")))))])]
+          []
 
     it "accepts rules" $ do
      let ruleIf = [r|ifneq ($(SRCDIR),src)
@@ -335,14 +337,14 @@ endif
   endif
     endif
 |]
-     parse ifStmt "" ruleIf `shouldParse`
-       IfStmt (NeqPred (Var (Lit "SRCDIR")) (Lit "src"))
-              [RuleDecl (Rule [Lit "all"]
-                              Nothing
-                              (Recipe [Lit "cd src && make -B"]))]
-              [RuleDecl (Rule [Lit "all"]
-                              Nothing
-                              (Recipe [Lit "cd not-src; make -B"]))]
+     parse ifDirective "" ruleIf `shouldParse`
+       If (NeqPred (Var (Lit "SRCDIR")) (Lit "src"))
+          [RuleDecl (Rule [Lit "all"]
+                          Nothing
+                          (Recipe [Lit "cd src && make -B"]))]
+          [RuleDecl (Rule [Lit "all"]
+                          Nothing
+                          (Recipe [Lit "cd not-src; make -B"]))]
 
 
   describe "makefile" $ do
