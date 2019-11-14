@@ -174,7 +174,7 @@ with a newline in it|]
 	x += appending stuff to x 
 endif
 |]
-      parse ifDirective "" ifNeqMultiLine `shouldParse`
+      parse (ifDirective parseTopLevel) "" ifNeqMultiLine `shouldParse`
         If (NeqPred (Lit "x x") (Lit "x y"))
            [Stmt (Bind False DeferredBinder (Lit "x") (Lit "ok line  1  "))
            ,Stmt (Bind False AppendBinder (Lit "x") (Lit "appending stuff to x "))]
@@ -187,7 +187,7 @@ else
 	eq11 = false
 endif
 |]
-      parse ifDirective "" ifEq11 `shouldParse`
+      parse (ifDirective parseTopLevel) "" ifEq11 `shouldParse`
         If (EqPred (Lit "1") (Lit "1"))
            [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "true"))]
            [Stmt (Bind False DeferredBinder (Lit "eq11") (Lit "false"))]
@@ -198,7 +198,7 @@ endif
 	x$(ok) += append $(x$(stuff))
 endif
 |]
-      parse ifDirective "" ifEqMultiLine `shouldParse`
+      parse (ifDirective parseTopLevel) "" ifEqMultiLine `shouldParse`
         If (NeqPred (Lit "x" `Cat` Var (Lit "ok"))
                     (Lit "xok_value"))
            [Stmt (Bind False DeferredBinder (Lit "x" `Cat` Var (Lit "ok")) (Lit "ok line  " `Cat` Var (Lit "1") `Cat` Lit "  "))
@@ -218,17 +218,17 @@ endif
 	42 = 43
 endif
 |]
-      parse ifDirective "" emptyField1 `shouldParse`
+      parse (ifDirective parseTopLevel) "" emptyField1 `shouldParse`
         If (NeqPred (Lit "") (Lit "xok_value"))
            [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
            []
 
-      parse ifDirective "" emptyField2 `shouldParse`
+      parse (ifDirective parseTopLevel) "" emptyField2 `shouldParse`
         If (EqPred (Var (Lit "x")) (Lit ""))
            [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
            []
 
-      parse ifDirective "" bothEmpty `shouldParse`
+      parse (ifDirective parseTopLevel) "" bothEmpty `shouldParse`
         If (EqPred (Lit "") (Lit ""))
            [Stmt (Bind False DeferredBinder (Lit "42") (Lit "43"))]
            []
@@ -238,7 +238,7 @@ endif
 	else = this is terrible
 endif
 |]
-      parse ifDirective "" bindElseInIf `shouldParse`
+      parse (ifDirective parseTopLevel) "" bindElseInIf `shouldParse`
         If (EqPred (Lit "1") (Lit "1"))
            [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
            []
@@ -249,7 +249,7 @@ else
 	else = this is still terrible
 endif
 |]
-      parse ifDirective "" bindElseInIfWithElse `shouldParse`
+      parse (ifDirective parseTopLevel) "" bindElseInIfWithElse `shouldParse`
         If (EqPred (Lit "1") (Lit "1"))
            [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is terrible"))]
            [Stmt (Bind False DeferredBinder (Lit "else") (Lit "this is still terrible"))]
@@ -263,15 +263,15 @@ endif
 else
 	y = unclosed if block
 |]
-      parse ifDirective "" `shouldFailOn` openIf
-      parse ifDirective "" `shouldFailOn` openElse
+      parse (ifDirective parseTopLevel) "" `shouldFailOn` openIf
+      parse (ifDirective parseTopLevel) "" `shouldFailOn` openElse
 
     it "accepts standalone expressions" $ do
      let nakedError = [r|ifneq ($(EMPTY),)
       $(error Empty "$(EMPTY)" isn't empty.)
 endif
 |]
-     parse ifDirective "" nakedError `shouldParse`
+     parse (ifDirective parseTopLevel) "" nakedError `shouldParse`
        If (NeqPred (Var (Lit "EMPTY")) (Lit ""))
           [Stmt (SExp (Builtin (PApp
                                 (App Error (Lit "Empty \"" `Cat` (Var (Lit "EMPTY") `Cat` Lit "\" isn't empty."))))))]
@@ -282,7 +282,7 @@ endif
       x = 42
     endif
 |]
-     parse ifDirective "" indentedEndIf `shouldParse`
+     parse (ifDirective parseTopLevel) "" indentedEndIf `shouldParse`
        If (NeqPred (Lit "42") (Lit "6*7"))
           [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
           []
@@ -293,7 +293,7 @@ endif
       x = 6*7
 endif
 |]
-     parse ifDirective "" indentedElse `shouldParse`
+     parse (ifDirective parseTopLevel) "" indentedElse `shouldParse`
        If (NeqPred (Lit "42") (Lit "6*7"))
           [Stmt (Bind False DeferredBinder (Lit "x") (Lit "42"))]
           [Stmt (Bind False DeferredBinder (Lit "x") (Lit "6*7"))]
@@ -304,7 +304,7 @@ endif
        oh = so
   endif
 |]
-     parse ifDirective "" indentedBoth `shouldParse`
+     parse (ifDirective parseTopLevel) "" indentedBoth `shouldParse`
        If (EqPred (Lit "iec61508") (Lit "b26262"))
           [Stmt (Bind False DeferredBinder (Lit "so") (Lit "oh"))]
           [Stmt (Bind False DeferredBinder (Lit "oh") (Lit "so"))]
@@ -319,7 +319,7 @@ endif
   endif
     endif
 |]
-     parse ifDirective "" nestedIf `shouldParse`
+     parse (ifDirective parseTopLevel) "" nestedIf `shouldParse`
        If (NeqPred (Lit "42") (Lit "6*7"))
           [Directive (If (EqPred (Lit "6*7") (Lit "42"))
                          [Stmt (SExp (Builtin (PApp (App Info (Lit "huh")))))]
@@ -337,7 +337,7 @@ endif
   endif
     endif
 |]
-     parse ifDirective "" ruleIf `shouldParse`
+     parse (ifDirective parseTopLevel) "" ruleIf `shouldParse`
        If (NeqPred (Var (Lit "SRCDIR")) (Lit "src"))
           [RuleDecl (Rule [Lit "all"]
                           Nothing
