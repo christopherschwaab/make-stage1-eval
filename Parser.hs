@@ -486,7 +486,9 @@ includeDirective :: Parser (Directive s)
 includeDirective = Include <$> try (chunk "include" *> expSpaces *> rexp)
 
 vpathDirective :: Parser (Directive s)
-vpathDirective = Include <$> try (chunk "vpath" *> expSpaces *> rexp)
+vpathDirective = VPath <$> try (chunk "vpath" *> expSpaces *> optional vpathArgs)
+  where vpathArgs = do l <- rexp
+                       maybe (Left l) (\r -> Right (l, r)) <$> (expSpaces *> optional rexp)
 
 eatLine :: Parser ()
 eatLine = expSpaces >> try (void emptyLine <|> eof)
@@ -531,8 +533,8 @@ directive dstmt = choice [ifDirective dstmt
                          ,includeDirective <* eatLine
                          ,vpathDirective <* eatLine]
 
+-- FIXME where can +- go?
 -- FIXME double-colon rules?
--- FIXME Factor into directive <|> decl.
 -- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
 parseTopLevel :: Parser TopLevel
 parseTopLevel = expSpaces *> choice [Directive <$> directive parseTopLevel
