@@ -131,20 +131,20 @@ with a newline in it|]
 |]
 
     it "matches simple rules" $ do
-      parse parseRecipe "" simpleRecipe1 `shouldParse` Recipe [Lit "echo calling all 1"]
-      parse parseRecipe "" simpleRecipe2 `shouldParse` Recipe [Lit "echo calling all 2",
-                                                               Lit "sed -i Makefile 's/cat/bat/'",
-                                                               Lit "echo \"calling all 2\""]
+      parse parseRecipe "" simpleRecipe1 `shouldParse` Recipe [RExp (Lit "echo calling all 1")]
+      parse parseRecipe "" simpleRecipe2 `shouldParse` Recipe [RExp (Lit "echo calling all 2"),
+                                                               RExp (Lit "sed -i Makefile 's/cat/bat/'"),
+                                                               RExp (Lit "echo \"calling all 2\"")]
 
     it "replaces line continuations with newlines" $ do
-      parse parseRecipe "" lineCont1 `shouldParse` Recipe [Lit "echo calling all 3 \nwith a newline in it"]
+      parse parseRecipe "" lineCont1 `shouldParse` Recipe [RExp (Lit "echo calling all 3 \nwith a newline in it")]
 
     it "accepts an empty rule of whitespace" $ do
       runParser' parseRecipe (initialState emptyLinesRecipe) `succeedsLeaving` ""
 
     it "accepts a non-empty line between empty lines" $ do
       runParser' parseRecipe (initialState mostlyEmptyLinesRecipe ) `succeedsLeaving` ""
-      parse parseRecipe "" mostlyEmptyLinesRecipe `shouldParse` Recipe [Lit "echo single command between empty lines"]
+      parse parseRecipe "" mostlyEmptyLinesRecipe `shouldParse` Recipe [RExp (Lit "echo single command between empty lines")]
 
   describe "parseTopLevel" $ do
     it [r|handles x := xval\\\$\\\#2|] $ do
@@ -341,10 +341,10 @@ endif
        If (NeqPred (Var (Lit "SRCDIR")) (Lit "src"))
           [RuleDecl (Rule [Lit "all"]
                           Nothing
-                          (Recipe [Lit "cd src && make -B"]))]
+                          (Recipe [RExp (Lit "cd src && make -B")]))]
           [RuleDecl (Rule [Lit "all"]
                           Nothing
-                          (Recipe [Lit "cd not-src; make -B"]))]
+                          (Recipe [RExp (Lit "cd not-src; make -B")]))]
 
 
   describe "makefile" $ do
@@ -362,10 +362,10 @@ test:
 	echo doing all with deps t1 and t2
 |]
 
-      parse makefile "" basic `shouldParse` [RuleDecl (Rule [Lit "all"] Nothing (Recipe [Lit "echo all target called"]))]
-      parse makefile "" multiTarget `shouldParse` [RuleDecl (Rule [Lit "all"] Nothing (Recipe [Lit "echo all target called"]))
-                                                  ,RuleDecl (Rule [Lit "test"] Nothing (Recipe [Lit "echo doing test target"]))]
-      parse makefile "" deps `shouldParse` [RuleDecl (Rule [Lit "all"] (Just (Lit " t1 t2")) (Recipe [Lit "echo doing all with deps t1 and t2"]))]
+      parse makefile "" basic `shouldParse` [RuleDecl (Rule [Lit "all"] Nothing (Recipe [RExp (Lit "echo all target called")]))]
+      parse makefile "" multiTarget `shouldParse` [RuleDecl (Rule [Lit "all"] Nothing (Recipe [RExp (Lit "echo all target called")]))
+                                                  ,RuleDecl (Rule [Lit "test"] Nothing (Recipe [RExp (Lit "echo doing test target")]))]
+      parse makefile "" deps `shouldParse` [RuleDecl (Rule [Lit "all"] (Just (Lit " t1 t2")) (Recipe [RExp (Lit "echo doing all with deps t1 and t2")]))]
 
     it "accepts multiple binders" $ do
       let twoBinds = [r|x0=true

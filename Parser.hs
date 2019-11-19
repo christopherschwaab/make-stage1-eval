@@ -215,36 +215,44 @@ evalStmt (Bind override b e1 e2) = do -- FIXME override
       put (st{env=p'})
 evalStmt (SExp e) = () <$ evalExp e
 
-evalDirective :: (s -> Interpreter a) -> Directive s -> Interpreter ()
-evalDirective evalDStmt (Include e) = do
-  f <- unpack . fromValue <$> evalExp e
-  r <- liftIO (parse makefile f <$> TIO.readFile f)
-  case r of
-    Left err -> error (errorBundlePretty err)
-    Right p -> evalProgram p
-evalDirective evalDStmt (VPath Nothing) = undefined -- FIXME
-evalDirective evalDStmt (VPath (Just (Left e))) = undefined -- FIXME
-evalDirective evalDStmt (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
-evalDirective evalDStmt (If pred ss1 ss2) = do
+evalDirective :: Directive s -> Interpreter s
+evalDirective (VPath Nothing) = undefined -- FIXME
+evalDirective (VPath (Just (Left e))) = undefined -- FIXME
+evalDirective (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
+evalDirective (If pred ss1 ss2) = do
   b <- evalIfPred pred
-  if b then mapM_ evalDStmt ss1
-    else mapM_ evalDStmt ss2
+  return (if b then ss1 else ss2)
   where evalIfPred (EqPred e1 e2) = (==) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
         evalIfPred (NeqPred e1 e2) = (/=) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
         evalIfPred (DefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
         evalIfPred (NotDefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
+
+evalRecipeLine :: RecipeLine -> Interpreter [Exp]
+evalRecipeLine (RExp e) = return [e]
+evalRecipeLine (RDirective d) = do rs <- evalDirective d
+                                   concat <$> mapM evalRecipeLine rs
 
 -- FIXME double check the order things get evaluated here
 evalRule :: Rule -> Interpreter ()
 evalRule (Rule ts d (Recipe es)) = do
   vts <- mapM (fmap fromValue . evalExp) ts
   deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
-  modify (\st -> st{targets = foldr (addTarget deps) (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
-  where addTarget deps t m = Map.insert t (deps, es) m
+  es' <- concat <$> mapM evalRecipeLine es
+  modify (\st -> st{targets = foldr (addTarget deps es') (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
+  where addTarget deps es' t m = Map.insert t (deps, es') m
+
+evalTopLevelDirective :: TopLevelDirective -> Interpreter Program
+evalTopLevelDirective (Include e) = do
+  f <- unpack . fromValue <$> evalExp e
+  r <- liftIO (parse makefile f <$> TIO.readFile f)
+  case r of
+    Left err -> error (errorBundlePretty err)
+    Right s -> return s
 
 evalTopLevel :: TopLevel -> Interpreter ()
 evalTopLevel (Stmt s) = evalStmt s
-evalTopLevel (Directive d) = evalDirective evalTopLevel d
+evalTopLevel (Directive d) = evalProgram =<< evalDirective d
+evalTopLevel (TopLevelDirective d) = evalProgram =<< evalTopLevelDirective d
 evalTopLevel (RuleDecl r) = evalRule r
 
 evalProgram :: Program -> Interpreter ()
@@ -474,15 +482,17 @@ recipeLineLeadingWhite = void (collapseContLines leadingWhite)
   where leadingWhite = takeWhileP (Just "recipe leading whitespace") (`elem` [' ', '\t'])
 
 -- FIXME recipes can have directives inside them
-recipeLine :: Parser (Maybe Exp)
-recipeLine = char '\t' *> recipeLineLeadingWhite *> (nonEmptyRecipeLine <|> emptyLine)
-  where nonEmptyRecipeLine = Just <$> recipeInnerExp []
+recipeLine :: Parser RecipeLine
+recipeLine = choice [RExp <$> recipeExp
+                    ,RDirective <$> recipeDirective]
+  where recipeDirective = directive recipeLine
+        recipeExp = try (char '\t' *> recipeLineLeadingWhite *> recipeInnerExp [])
 
 parseRecipe :: Parser Recipe
-parseRecipe = Recipe . catMaybes <$> many (recipeLine <|> try blankLine)
+parseRecipe = Recipe . catMaybes <$> many (fmap Just recipeLine <|> try blankLine)
   where blankLine = recipeLineLeadingWhite *> emptyLine
 
-includeDirective :: Parser (Directive s)
+includeDirective :: Parser TopLevelDirective
 includeDirective = Include <$> try (chunk "include" *> expSpaces *> rexp)
 
 vpathDirective :: Parser (Directive s)
@@ -507,7 +517,7 @@ guardedDStmt :: Parser s -> Parser a -> Parser [s]
 guardedDStmt dstmt p = catMaybes <$> many (notFollowedBy p *> expSpaces *> d)
   where d = (Just <$> dstmt) <|> try emptyLine
 
-ifDirective :: Parser s -> Parser (Directive s)
+ifDirective :: Parser s -> Parser (Directive [s])
 ifDirective dstmt = do
   p <- ifPred
   ss1 <- nonElseEndIfDStmts
@@ -528,16 +538,19 @@ decl override = do
     LRuleDecl es -> RuleDecl <$> parseRule (if override then Lit "override":es else es)
     LExp e -> return (Stmt (SExp e))
 
-directive :: Parser s -> Parser (Directive s)
+directive :: Parser s -> Parser (Directive [s])
 directive dstmt = choice [ifDirective dstmt
-                         ,includeDirective <* eatLine
                          ,vpathDirective <* eatLine]
+
+topLevelDirective :: Parser TopLevelDirective
+topLevelDirective = includeDirective <* eatLine
 
 -- FIXME where can +- go?
 -- FIXME double-colon rules?
 -- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
 parseTopLevel :: Parser TopLevel
 parseTopLevel = expSpaces *> choice [Directive <$> directive parseTopLevel
+                                    ,TopLevelDirective <$> topLevelDirective
                                     ,override
                                     ,decl False]
   where override = expSpaces *> chunk "override" *> expSpaces *> decl True
