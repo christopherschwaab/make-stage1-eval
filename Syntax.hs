@@ -100,32 +100,38 @@ data IfPred
   | DefinedPred Exp
   | NotDefinedPred Exp
   deriving (Eq, Show)
-data Stmt
-  = Bind Bool Binder Exp Exp
-  | SExp Exp
-  deriving (Eq, Show)
+
 data Directive s = If IfPred s s
                  | VPath (Maybe (Either Exp (Exp, Exp)))
+                 | Include Exp
   deriving (Eq, Show)
 
-data RecipeLine = RDirective (Directive [RecipeLine])
+data RecipeLine = RIf IfPred [RecipeLine] [RecipeLine]
                 | RExp Exp
   deriving (Eq, Show)
 newtype Recipe = Recipe [RecipeLine]
   deriving (Eq, Show)
-data RuleExp = RuleExp Exp | RuleBind Exp Exp
-  deriving (Eq, Show)
-data Rule = Rule [Exp] (Maybe Exp) Recipe -- FIXME add locally bound variables to deps
-  deriving (Eq, Show)
-data TopLevelDirective = Include Exp
-  deriving (Eq, Show)
-data TopLevel = Stmt Stmt
-              | RuleDecl Rule
-              | Directive (Directive [TopLevel])
-              | TopLevelDirective TopLevelDirective
+data Rule = Rule [Exp] (Maybe Exp) Recipe
   deriving (Eq, Show)
 
-type Program = [TopLevel]
+data Term
+  = Indented Term
+  | TExp [Exp]
+  | RuleDecl [Exp] (Maybe Exp)
+  | TAssign Binder Exp [Exp] Text Exp
+  | TOverride Binder Exp [Exp] Text Exp
+  | TDirective (Directive [Term])
+  deriving (Eq, Show)
+
+data Stmt
+  = SExp Exp
+  | SRule Rule
+  | Assign Binder Exp Exp
+  | Override Binder Exp Exp
+  | SDirective (Directive [Stmt])
+  deriving (Eq, Show)
+
+type Program = [Term]
 
 class PrettyAppExp sh where
   prettyAppExp :: sh -> Text
@@ -180,60 +186,66 @@ prettyBinder ShellBinder = "!="
 prettyBinder AppendBinder = "+="
 
 prettyRecipeLine :: RecipeLine -> Text
-prettyRecipeLine (RDirective r) = prettyDirective prettyRecipeLine r
+prettyRecipeLine (RIf p rs1 rs2) = prettyIf prettyRecipeLine p rs1 rs2
 prettyRecipeLine (RExp e) = "\t" `append` prettyExp e
 
 prettyRecipe :: Recipe -> Text
 prettyRecipe (Recipe es) = "\t" `append` T.intercalate "\n" (map prettyRecipeLine es)
 
-prettyRuleExp :: RuleExp -> Text
-prettyRuleExp (RuleExp e) = prettyExp e
-prettyRuleExp (RuleBind e1 e2) = T.concat [prettyExp e1, "=", prettyExp e2]
-
-prettyRule :: Rule -> Text
-prettyRule (Rule es mdeps r) = T.concat [T.intercalate " " (map prettyExp es)
-                                        ,":"
-                                        ,prettyDeps mdeps
-                                        ,"\n"
-                                        ,prettyRecipe r]
+prettyRuleDecl :: [Exp] -> Maybe Exp -> Text
+prettyRuleDecl es mdeps = T.concat [T.intercalate " " (map prettyExp es)
+                                   ,":"
+                                   ,prettyDeps mdeps]
   where prettyDeps (Just deps) = " " `append` prettyExp deps
         prettyDeps Nothing = ""
+
+prettyRule :: Rule -> Text
+prettyRule (Rule es mdeps r) = prettyRuleDecl es mdeps `append` "\n" `append` prettyRecipe r
 
 indent :: Int -> Text -> Text
 indent d t = T.replicate d "\t" `append` t
 
-prettyStmt :: Stmt -> Text
-prettyStmt (Bind override b e1 e2) =
-  let t = T.intercalate " " [prettyExp e1, prettyBinder b, prettyExp e2]
-  in if override then "override " `append` t
-       else t
-prettyStmt (SExp e) = prettyExp e
+prettyAssign :: Binder -> Exp -> Exp -> Text
+prettyAssign b e1 e2 = T.intercalate " " [prettyExp e1, prettyBinder b, prettyExp e2]
 
-prettyDirective :: (a -> Text) -> Directive [a] -> Text
-prettyDirective prettyDStmt (VPath Nothing) = "vpath"
-prettyDirective prettyDStmt (VPath (Just (Left e))) = "vpath " `append` prettyExp e
-prettyDirective prettyDStmt (VPath (Just (Right (e1, e2)))) = "vpath " `append` prettyExp e1 `append` prettyExp e2
-prettyDirective prettyDStmt (If p ss1 ss2) =
+prettyTAssign :: Binder -> Exp -> [Exp] -> Text -> Exp -> Text
+prettyTAssign b e1 es w e2 = T.concat (prettyExp e1:map prettyExp es ++ [prettyBinder b, w, prettyExp e2])
+
+prettyTerm :: Term -> Text
+prettyTerm (Indented t) = indent 1 (prettyTerm t)
+prettyTerm (TExp es) = T.concat (map prettyExp es)
+prettyTerm (RuleDecl es mdeps) = prettyRuleDecl es mdeps
+prettyTerm (TAssign b e1 es w e2) = prettyTAssign b e1 es w e2
+prettyTerm (TOverride b e1 es w e2) = "override " `append` prettyTAssign b e1 es w e2
+prettyTerm (TDirective d) = prettyDirective prettyTerm d
+
+prettyStmt :: Stmt -> Text
+prettyStmt (SExp e) = prettyExp e
+prettyStmt (SRule r) = prettyRule r
+prettyStmt (Assign b e1 e2) = prettyAssign b e1 e2
+prettyStmt (Override b e1 e2) = "override " `append` prettyAssign b e1 e2
+prettyStmt (SDirective d) = prettyDirective prettyStmt d
+
+prettyIf :: (a -> Text) -> IfPred -> [a] -> [a] -> Text
+prettyIf prettyDStmt p ss1 ss2 =
   let prettySs1 = T.intercalate "\n" (map prettyDStmt ss1)
       prettyPred = prettyIfPred p
   in if null ss2
-       then T.intercalate "\n" [prettyPred, "\t" `append` prettySs1, "endif"]
-       else let prettySs2 = T.intercalate "\n\t" (map prettyDStmt ss2)
-            in T.intercalate "\n" [prettyPred, "\t" `append` prettySs1, "else", "\t" `append` prettySs2, "endif"]
-  where prettyBinIf e1 e2 = T.concat [" (", prettyExp e1, ",", prettyExp e2, ")"]
+       then T.intercalate "\n" [prettyPred, "  " `append` prettySs1, "endif"]
+       else let prettySs2 = T.intercalate "\n  " (map prettyDStmt ss2)
+            in T.intercalate "\n" [prettyPred, "  " `append` prettySs1, "else", "  " `append` prettySs2, "endif"]
+  where prettyBinIf e1 e2 = T.concat ["(", prettyExp e1, ",", prettyExp e2, ")"]
         prettyIfPred (EqPred e1 e2) = "ifeq " `append` prettyBinIf e1 e2
         prettyIfPred (NeqPred e1 e2) = "ifneq " `append` prettyBinIf e1 e2
         prettyIfPred (DefinedPred e) = "ifdef " `append` prettyExp e
         prettyIfPred (NotDefinedPred e) = "ifndef "  `append` prettyExp e
 
-prettyTopLevelDirective :: TopLevelDirective -> Text
-prettyTopLevelDirective (Include e) = "include " `append` prettyExp e
-
-prettyTopLevel :: TopLevel -> Text
-prettyTopLevel (Stmt s) = prettyStmt s
-prettyTopLevel (RuleDecl r) = T.concat ["\n", prettyRule r, "\n"]
-prettyTopLevel (Directive d) = prettyDirective prettyTopLevel d
-prettyTopLevel (TopLevelDirective d) = prettyTopLevelDirective d
+prettyDirective :: (a -> Text) -> Directive [a] -> Text
+prettyDirective prettyDStmt (VPath Nothing) = "vpath"
+prettyDirective prettyDStmt (VPath (Just (Left e))) = "vpath " `append` prettyExp e
+prettyDirective prettyDStmt (VPath (Just (Right (e1, e2)))) = "vpath " `append` prettyExp e1 `append` prettyExp e2
+prettyDirective prettyDStmt (If p ss1 ss2) = prettyIf prettyDStmt p ss1 ss2
+prettyDirective prettyDStmt (Include e) = "include " `append` prettyExp e
 
 prettyProgram :: Program -> Text
-prettyProgram ts = T.intercalate "\n" (map prettyTopLevel ts)
+prettyProgram ts = T.intercalate "\n" (map prettyTerm ts)

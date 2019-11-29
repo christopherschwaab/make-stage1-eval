@@ -186,81 +186,6 @@ evalBuiltin Basename e = Value . intercalate " " . map basename . splitFields . 
   where basename = pack . dropExtensions . unpack
 evalBuiltin Info e = evalExp e
 
-evalStmt :: Stmt -> Interpreter ()
-evalStmt (Bind override b e1 e2) = do -- FIXME override
-  Value x <- evalExp e1
-  case b of
-    DeferredBinder -> modify (\st -> st{env=Map.insert x (Deferred e2) (env st)})
-    ImmediateBinder -> do v <- evalExp e2
-                          modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
-    DefaultValueBinder -> do
-      st <- get
-      let p = env st
-      p' <- case Map.lookup x p of
-        Just _ -> return p
-        Nothing -> do v <- evalBuiltin Shell e2
-                      return (Map.insert x (Immediate v) p) -- is this immediate or deferred?
-      put (st{env=p'})
-    ShellBinder -> do v <- evalBuiltin Shell e2
-                      modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
-    AppendBinder -> do
-      st <- get
-      let p = env st
-      p' <- case Map.lookup x p of
-        Just (Immediate (Value v')) -> do
-          Value v <- evalExp e2
-          return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
-        Just (Deferred e') -> return (Map.insert x (Deferred (e' `cat` Lit " " `cat` e2)) p)
-        Nothing -> undefined -- what does make do in this case?
-      put (st{env=p'})
-evalStmt (SExp e) = () <$ evalExp e
-
-evalDirective :: Directive s -> Interpreter s
-evalDirective (VPath Nothing) = undefined -- FIXME
-evalDirective (VPath (Just (Left e))) = undefined -- FIXME
-evalDirective (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
-evalDirective (If pred ss1 ss2) = do
-  b <- evalIfPred pred
-  return (if b then ss1 else ss2)
-  where evalIfPred (EqPred e1 e2) = (==) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
-        evalIfPred (NeqPred e1 e2) = (/=) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
-        evalIfPred (DefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
-        evalIfPred (NotDefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
-
-evalRecipeLine :: RecipeLine -> Interpreter [Exp]
-evalRecipeLine (RExp e) = return [e]
-evalRecipeLine (RDirective d) = do rs <- evalDirective d
-                                   concat <$> mapM evalRecipeLine rs
-
--- FIXME double check the order things get evaluated here
-evalRule :: Rule -> Interpreter ()
-evalRule (Rule ts d (Recipe es)) = do
-  vts <- mapM (fmap fromValue . evalExp) ts
-  deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
-  es' <- concat <$> mapM evalRecipeLine es
-  modify (\st -> st{targets = foldr (addTarget deps es') (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
-  where addTarget deps es' t m = Map.insert t (deps, es') m
-
-evalTopLevelDirective :: TopLevelDirective -> Interpreter Program
-evalTopLevelDirective (Include e) = do
-  f <- unpack . fromValue <$> evalExp e
-  r <- liftIO (parse makefile f <$> TIO.readFile f)
-  case r of
-    Left err -> error (errorBundlePretty err)
-    Right s -> return s
-
-evalTopLevel :: TopLevel -> Interpreter ()
-evalTopLevel (Stmt s) = evalStmt s
-evalTopLevel (Directive d) = evalProgram =<< evalDirective d
-evalTopLevel (TopLevelDirective d) = evalProgram =<< evalTopLevelDirective d
-evalTopLevel (RuleDecl r) = evalRule r
-
-evalProgram :: Program -> Interpreter ()
-evalProgram = mapM_ evalTopLevel
-
-run :: Program -> IO EvalState
-run p = execStateT (evalProgram p) (EvalState{env=Map.empty, targets=Map.empty})
-
 cat :: Exp -> Exp -> Exp
 cat (Lit t1) (Lit t2)
   | T.null t1 = Lit t2
@@ -287,19 +212,33 @@ parens = between (char '(') (char ')')
 braces :: Parser a -> Parser a
 braces = between (char '{') (char '}')
 
-escaped :: Text -> Parser Text
-escaped nl = choice [char '#'   *> pure "#"
-                    ,char '\\'  *> pure "\\"
-                    ,char '\n'  *> pure nl]
+optionalTExp :: [Char] -> Parser Exp
+optionalTExp = option (Lit "") . termExp
 
-litExp :: Text -> [Char] -> Parser Text
-litExp nl tchars = foldr1 append <$> some (do
-  let nonLitChar = ['\\', '$', '\n', '#'] ++ tchars
-  l <- takeWhileP (Just "literal character") (\c -> not (c `elem` nonLitChar))
-  choice [l `append` nl <$ try lineContinuation
-         ,l `append` "$" <$ chunk "$$"
-         ,append l <$> (char '\\' *> option "\\" (escaped nl))
-         ,l <$ guard (not (T.null l))])
+-- Make allows literal right-parentheses as long as they are balanced with some
+-- opening left-parentheses *except* for final arguments which seems to allow
+-- arbitrary parentheses and the longest match is used.
+expArg :: [Char] -> Parser Exp
+expArg tchars = do e <- optionalTExp ('(':tchars)
+                   (cat e <$> catParens (expArg tchars)) <|> pure e
+  where catParens p = do t <- parens p
+                         cat ("(" `catl` t `catr` ")") <$> p
+
+expArgs :: [Char] -> Natural -> Parser [Exp]
+expArgs tchars 0 = pure []
+expArgs tchars 1 = return <$> expArg tchars
+expArgs tchars n = (:) <$> expArg (',':tchars) <*> args (pred n) where
+  args :: Natural -> Parser [Exp]
+  args 1 = return <$> (char ',' *> optionalTExp tchars)
+  args n = (:) <$> (char ',' *> expArg (',':tchars)) <*> args (pred n)
+
+expVarArgs :: [Char] -> Parser [Exp]
+expVarArgs tchars = optionalTExp (',':tchars) `sepBy` char ','
+
+ifArgs :: [Char] -> Parser (Exp, Exp, Maybe Exp)
+ifArgs tchars = (,,) <$> expArg (',':tchars)
+                     <*> (char ',' *> expArg (',':tchars))
+                     <*> optional (char ',' *> expArg tchars)
 
 class ParseBuiltinArgs sh where
   parseBuiltinArgs :: [Char] -> Parser sh
@@ -314,10 +253,8 @@ instance ParseBuiltinArgs (Exp, Exp, Exp) where
 instance ParseBuiltinArgs (Exp, Exp, Maybe Exp) where
   parseBuiltinArgs tchars = ifArgs tchars
 
-ifArgs :: [Char] -> Parser (Exp, Exp, Maybe Exp)
-ifArgs tchars = (,,) <$> expArg (',':tchars)
-                     <*> (char ',' *> expArg (',':tchars))
-                     <*> optional (char ',' *> expArg tchars)
+lineContinuation :: Parser Text
+lineContinuation = " " <$ (char '\\' >> eol) -- Is this even correct? What does make consider a line end?
 
 builtin :: [Char] -> Parser PAppliedBuiltin
 builtin tchars = choice builtins where
@@ -344,23 +281,18 @@ builtin tchars = choice builtins where
 
 varsubstOrLit :: [Char] -> Exp -> Parser Exp
 varsubstOrLit tchars e = do char ':'
-                            l <- stmtInnerExp ('=':tchars)
+                            l <- termExp ('=':tchars)
                             varsubst l <|> pure (e `catr` ":" `cat` l)
-  where varsubst l = Varsubst e l <$> (char '=' *> stmtInnerExp tchars)
+  where varsubst l = Varsubst e l <$> (char '=' *> termExp tchars)
 
-innerExp :: Text -> [Char] -> Parser Exp
-innerExp nl tchars = foldr1 cat <$> some exp where
-  exp :: Parser Exp
-  exp = do e <- choice [Lit <$> litExp nl tchars
-                       ,char '$' *> dollarExp]
-           option e (varsubstOrLit tchars e)
-
-stmtInnerExp = innerExp " "
-recipeInnerExp = innerExp "\n"
+escaped :: Text -> Parser Text
+escaped nl = choice [char '#'   *> pure "#"
+                    ,char '\\'  *> pure "\\"
+                    ,char '\n'  *> pure nl]
 
 dollarExp :: Parser Exp
-dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> stmtInnerExp [':', ')'])
-                   ,braces (builtinCall '}' <|> builtinOrVar <$> stmtInnerExp [':', '}'])
+dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> termExp [':', ')'])
+                   ,braces (builtinCall '}' <|> builtinOrVar <$> termExp [':', '}'])
                    ,Var . Lit <$> singleCharVar]
   where singleCharVar = (char '\\' *> escaped " ")
                     <|> option "" (T.singleton <$> anySingleBut '\n')
@@ -368,154 +300,64 @@ dollarExp = choice [parens (builtinCall ')' <|> builtinOrVar <$> stmtInnerExp ['
         builtinOrVar e@(Varsubst _ _ _) = e
         builtinOrVar e = Var e
 
+litExp :: Text -> [Char] -> Parser Text
+litExp nl tchars = foldr1 append <$> some (do
+  let nonLitChar = ['\\', '$', '\n', '#'] ++ tchars
+  l <- takeWhileP (Just "literal character") (\c -> not (c `elem` nonLitChar))
+  choice [l `append` nl <$ try lineContinuation
+         ,l `append` "$" <$ chunk "$$"
+         ,append l <$> (char '\\' *> option "\\" (escaped nl))
+         ,l <$ guard (not (T.null l))])
+
+expr :: Text -> [Char] -> Parser Exp
+expr nl tchars = foldr1 cat <$> some expr' where
+  expr' :: Parser Exp
+  expr' = do e <- choice [Lit <$> litExp nl tchars
+                         ,char '$' *> dollarExp]
+             option e (varsubstOrLit tchars e)
+
+termExp = expr " "
+ruleExp = expr "\n"
+
 rexp :: Parser Exp
-rexp = stmtInnerExp []
-
-lineContinuation :: Parser Text
-lineContinuation = " " <$ (char '\\' >> eol) -- Is this even correct? What does make consider a line end?
-
-expectLineContinuation :: Char -> Parser ()
-expectLineContinuation '\\' = pure ()
-expectLineContinuation _ = fail "Newlines in rule identifiers must be escaped by a backslash \\."
-
-data LWord = LVarDecl Exp Binder | LRuleDecl [Exp] | LExp Exp
-  deriving (Eq, Show)
-
--- FIXME This is a mess.
---moreLWord :: [Exp] -> Parser LWord
---moreLWord es = lword =<< (:es) <$> (lexp <* expSpaces) where
---  lexp = choice [Lit . T.concat <$> llits
---                ,char '$' *> dollarExp]
---  llitExp = litExp " " [' ', '?', '!', '+', '=', '\t']
---  llits = (:) <$> llitExp
---              <*> many (do notFollowedBy binder
---                           append <$> fmap T.singleton (oneOf ['?', '!', '+']) <*> option "" llitExp)
-
---lword :: [Exp] -> Parser LWord
---lword es = choice [LVarDecl <$> projectVarName es <*> binder
---                  ,LRuleDecl es <$ char ':'
---                  ,moreLWord es <|> (LExp <$> projectExp es)]
---  where projectVarName = projectHead "variable name without space literals"
---        projectExp = projectHead "single top-level expression"
---        projectHead msg es = do (guard (length es == 1) <?> msg)
---                                return (head es)
---{-# INLINE lword #-}
-
-llit :: Parser Text
-llit = T.concat <$> some (binderChar <|> litExp " " [' ', '\t', '?', '!', '+', '=', ':'])
-  where binderChar = notFollowedBy binder *> (T.singleton <$> oneOf ['?', '!', '+'])
-
-lexp :: Parser Exp
-lexp = choice [Lit <$> llit
-              ,char '$' *> dollarExp]
-
-lword :: [Exp] -> Parser LWord
-lword es = do e <- foldr1 cat <$> some lexp
-              expSpaces
-              choice [LVarDecl <$> projectVarName (e:es) <*> binder -- FIXME die if es is non-empty
-                     ,LRuleDecl (e:es) <$ char ':'
-                     ,lword (e:es)
-                     ,LExp <$> projectExp (e:es)]
-  where projectVarName = projectHead "a variable name without spaces"
-        projectExp = projectHead "a single top-level expression"
-        projectHead :: String -> [Exp] -> Parser Exp
-        projectHead msg es = do (guard (length es == 1) <?> msg)
-                                return (head es)
-
-parseLWord :: Parser LWord
-parseLWord = lword []
-
-optionalStmtInnerExp :: [Char] -> Parser Exp
-optionalStmtInnerExp = option (Lit "") . stmtInnerExp
-
--- Make allows literal right-parentheses as long as they are balanced with some
--- opening left-parentheses *except* for final arguments which seems to allow
--- arbitrary parentheses and the longest match is used.
-expArg :: [Char] -> Parser Exp
-expArg tchars = do e <- optionalStmtInnerExp ('(':tchars)
-                   (cat e <$> catParens (expArg tchars)) <|> pure e
-  where catParens p = do t <- parens p
-                         cat ("(" `catl` t `catr` ")") <$> p
-
-expArgs :: [Char] -> Natural -> Parser [Exp]
-expArgs tchars 0 = pure []
-expArgs tchars 1 = return <$> expArg tchars
-expArgs tchars n = (:) <$> expArg (',':tchars) <*> args (pred n) where
-  args :: Natural -> Parser [Exp]
-  args 1 = return <$> (char ',' *> optionalStmtInnerExp tchars)
-  args n = (:) <$> (char ',' *> expArg (',':tchars)) <*> args (pred n)
-
-expVarArgs :: [Char] -> Parser [Exp]
-expVarArgs tchars = optionalStmtInnerExp (',':tchars) `sepBy` char ','
+rexp = termExp []
 
 collapseContLines :: Parser a -> Parser (NonEmpty a)
 collapseContLines p = (:|) <$> p <*> many (lineContinuation *> p)
-
-binder :: Parser Binder
-binder = choice [char '='   *> pure DeferredBinder
-                ,chunk ":=" *> pure ImmediateBinder
-                ,chunk "!=" *> pure ShellBinder
-                ,chunk "?=" *> pure DefaultValueBinder
-                ,chunk "+=" *> pure AppendBinder]
-
-parseBinding :: Bool -> Exp -> Parser Stmt
-parseBinding override e = Bind override <$> (binder <* expSpaces) <*> pure e <*> option (Lit "") rexp
 
 expSpaces :: Parser Text
 expSpaces = foldr1 (\s1 s2 -> s1 `append` " " `append` s2) <$> collapseContLines spaces
   where spaces :: Parser Text
         spaces = takeWhileP (Just "space") (`elem` [' ', '\t'])
 
-parseRule :: [Exp] -> Parser Rule
-parseRule es = Rule es <$> (optional parseDependencies <* eol) <*> parseRecipe
-
--- FIXME when does evaluation occur here?
-parseDependencies :: Parser Exp
-parseDependencies = rexp
-
-emptyLine :: Parser (Maybe a)
-emptyLine = Nothing <$ choice [void eol
-                              ,skipLineComment "#" <* option () (void eol)]
-
-recipeLineLeadingWhite :: Parser ()
-recipeLineLeadingWhite = void (collapseContLines leadingWhite)
-  where leadingWhite = takeWhileP (Just "recipe leading whitespace") (`elem` [' ', '\t'])
-
--- FIXME recipes can have directives inside them
-recipeLine :: Parser RecipeLine
-recipeLine = choice [RExp <$> recipeExp
-                    ,RDirective <$> recipeDirective]
-  where recipeDirective = directive recipeLine
-        recipeExp = try (char '\t' *> recipeLineLeadingWhite *> recipeInnerExp [])
-
-parseRecipe :: Parser Recipe
-parseRecipe = Recipe . catMaybes <$> many (fmap Just recipeLine <|> try blankLine)
-  where blankLine = recipeLineLeadingWhite *> emptyLine
-
-includeDirective :: Parser TopLevelDirective
-includeDirective = Include <$> try (chunk "include" *> expSpaces *> rexp)
-
 vpathDirective :: Parser (Directive s)
 vpathDirective = VPath <$> try (chunk "vpath" *> expSpaces *> optional vpathArgs)
   where vpathArgs = do l <- rexp
                        maybe (Left l) (\r -> Right (l, r)) <$> (expSpaces *> optional rexp)
 
+includeDirective :: Parser (Directive s)
+includeDirective = Include <$> try (chunk "include" *> expSpaces *> rexp)
+
+emptyLine :: Parser (Maybe a)
+emptyLine = Nothing <$ choice [void eol
+                              ,skipLineComment "#" <* option () (void eol)]
+
 eatLine :: Parser ()
 eatLine = expSpaces >> try (void emptyLine <|> eof)
+
+guardedDStmt :: Parser s -> Parser a -> Parser [s]
+guardedDStmt dstmt p = catMaybes <$> many (notFollowedBy p *> expSpaces *> d)
+  where d = (Just <$> dstmt) <|> try emptyLine
 
 ifPred :: Parser IfPred
 ifPred = unaryIfPred <|> binIfPred
   where unaryIfPred = choice [DefinedPred <$ try (chunk "ifdef" >> expSpaces)
                              ,NotDefinedPred <$ try (chunk "ifndef" >> expSpaces)]
-                        <*> option (Lit "") (stmtInnerExp [])
+                        <*> option (Lit "") (termExp [])
         binIfPred = choice [EqPred <$ try (chunk "ifeq" >> expSpaces >> char '(')
                            ,NeqPred <$ try (chunk "ifneq" >> expSpaces >> char '(')]
-                      <*> (option (Lit "") (stmtInnerExp [',']) <* char ',')
-                      <*> (option (Lit "") (stmtInnerExp [')']) <* char ')')
-
-guardedDStmt :: Parser s -> Parser a -> Parser [s]
-guardedDStmt dstmt p = catMaybes <$> many (notFollowedBy p *> expSpaces *> d)
-  where d = (Just <$> dstmt) <|> try emptyLine
+                      <*> (option (Lit "") (termExp [',']) <* char ',')
+                      <*> (option (Lit "") (termExp [')']) <* char ')')
 
 ifDirective :: Parser s -> Parser (Directive [s])
 ifDirective dstmt = do
@@ -529,31 +371,132 @@ ifDirective dstmt = do
         nonElseEndIfDStmts = guardedDStmt dstmt (expSpaces *> (chunk "else" <|> chunk "endif") *> eatLine)
         nonEndIfDStmts = guardedDStmt dstmt (expSpaces *> chunk "endif" *> eatLine)
 
--- FIXME add export
-decl :: Bool -> Parser TopLevel
-decl override = do
-  l <- parseLWord
-  case l of
-    LVarDecl e b -> Stmt . Bind override b e <$> (expSpaces *> option (Lit "") rexp)
-    LRuleDecl es -> RuleDecl <$> parseRule (if override then Lit "override":es else es)
-    LExp e -> return (Stmt (SExp e))
-
 directive :: Parser s -> Parser (Directive [s])
 directive dstmt = choice [ifDirective dstmt
-                         ,vpathDirective <* eatLine]
+                         ,vpathDirective <* eatLine
+                         ,includeDirective <* eatLine]
 
-topLevelDirective :: Parser TopLevelDirective
-topLevelDirective = includeDirective <* eatLine
+llit :: Parser Text
+llit = T.concat <$> some (binderChar <|> litExp " " [' ', '\t', '?', '!', '+', '=', ':'])
+  where binderChar = notFollowedBy binder *> (T.singleton <$> oneOf ['?', '!', '+'])
 
--- FIXME where can +- go?
--- FIXME double-colon rules?
--- Also things like keywords followed by a \\n are probably broken everywhere (and in builtin parsing)
-parseTopLevel :: Parser TopLevel
-parseTopLevel = expSpaces *> choice [Directive <$> directive parseTopLevel
-                                    ,TopLevelDirective <$> topLevelDirective
-                                    ,override
-                                    ,decl False]
+lexp :: Parser Exp
+lexp = choice [Lit <$> llit
+              ,char '$' *> dollarExp]
+
+binder :: Parser Binder
+binder = choice [char '='   *> pure DeferredBinder
+                ,chunk ":=" *> pure ImmediateBinder
+                ,chunk "!=" *> pure ShellBinder
+                ,chunk "?=" *> pure DefaultValueBinder
+                ,chunk "+=" *> pure AppendBinder]
+
+data LWord = LVarDecl Binder | LRuleDecl | LExp
+  deriving (Eq, Show)
+
+lword :: Parser ([Exp], LWord)
+lword = do
+  e <- foldr1 cat <$> some lexp
+  s <- expSpaces
+  (es, l) <- choice [(,) [] . LVarDecl <$> binder
+                    ,([], LRuleDecl) <$ char ':'
+                    ,lword
+                    ,pure ([], LExp)]
+  return ((if T.null s then [e] else [e, Lit s]) ++ es, l)
+
+decl :: Bool -> Parser Term
+decl override = do
+  (es, l) <- lword
+  case l of
+    LVarDecl b -> (if override then TOverride else TAssign) b (head es) (tail es) <$>
+                    expSpaces <*> option (Lit "") rexp
+    LRuleDecl -> RuleDecl es <$> (optional rexp <* eol)
+    LExp -> return (TExp es)
+
+unindentedTerm :: Parser Term
+unindentedTerm = expSpaces *> choice [TDirective <$> directive term
+                                     ,override
+                                     ,decl False]
   where override = expSpaces *> chunk "override" *> expSpaces *> decl True
 
+term :: Parser Term
+term = choice [Indented <$> (char '\t' *> unindentedTerm)
+              ,unindentedTerm]
+
 makefile :: Parser Program
-makefile = catMaybes <$> many ((Just <$> parseTopLevel) <|> try emptyLine)
+makefile = catMaybes <$> many ((Just <$> term) <|> try emptyLine)
+
+--evalStmt :: Stmt -> Interpreter ()
+--evalStmt (Bind override b e1 e2) = do -- FIXME override
+--  Value x <- evalExp e1
+--  case b of
+--    DeferredBinder -> modify (\st -> st{env=Map.insert x (Deferred e2) (env st)})
+--    ImmediateBinder -> do v <- evalExp e2
+--                          modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
+--    DefaultValueBinder -> do
+--      st <- get
+--      let p = env st
+--      p' <- case Map.lookup x p of
+--        Just _ -> return p
+--        Nothing -> do v <- evalBuiltin Shell e2
+--                      return (Map.insert x (Immediate v) p) -- is this immediate or deferred?
+--      put (st{env=p'})
+--    ShellBinder -> do v <- evalBuiltin Shell e2
+--                      modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
+--    AppendBinder -> do
+--      st <- get
+--      let p = env st
+--      p' <- case Map.lookup x p of
+--        Just (Immediate (Value v')) -> do
+--          Value v <- evalExp e2
+--          return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
+--        Just (Deferred e') -> return (Map.insert x (Deferred (e' `cat` Lit " " `cat` e2)) p)
+--        Nothing -> undefined -- what does make do in this case?
+--      put (st{env=p'})
+--evalStmt (SExp e) = () <$ evalExp e
+--
+--evalDirective :: Directive s -> Interpreter s
+--evalDirective (VPath Nothing) = undefined -- FIXME
+--evalDirective (VPath (Just (Left e))) = undefined -- FIXME
+--evalDirective (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
+--evalDirective (If pred ss1 ss2) = do
+--  b <- evalIfPred pred
+--  return (if b then ss1 else ss2)
+--  where evalIfPred (EqPred e1 e2) = (==) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
+--        evalIfPred (NeqPred e1 e2) = (/=) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
+--        evalIfPred (DefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
+--        evalIfPred (NotDefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
+--
+--evalRecipeLine :: RecipeLine -> Interpreter [Exp]
+--evalRecipeLine (RExp e) = return [e]
+--evalRecipeLine (RDirective d) = do rs <- evalDirective d
+--                                   concat <$> mapM evalRecipeLine rs
+--
+---- FIXME double check the order things get evaluated here
+--evalRule :: Rule -> Interpreter ()
+--evalRule (Rule ts d (Recipe es)) = do
+--  vts <- mapM (fmap fromValue . evalExp) ts
+--  deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
+--  es' <- concat <$> mapM evalRecipeLine es
+--  modify (\st -> st{targets = foldr (addTarget deps es') (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
+--  where addTarget deps es' t m = Map.insert t (deps, es') m
+--
+--evalTopLevelDirective :: TopLevelDirective -> Interpreter Program
+--evalTopLevelDirective (Include e) = do
+--  f <- unpack . fromValue <$> evalExp e
+--  r <- liftIO (parse makefile f <$> TIO.readFile f)
+--  case r of
+--    Left err -> error (errorBundlePretty err)
+--    Right s -> return s
+--
+--evalTopLevel :: TopLevel -> Interpreter ()
+--evalTopLevel (Stmt s) = evalStmt s
+--evalTopLevel (Directive d) = evalProgram =<< evalDirective d
+--evalTopLevel (TopLevelDirective d) = evalProgram =<< evalTopLevelDirective d
+--evalTopLevel (RuleDecl r) = evalRule r
+--
+--evalProgram :: Program -> Interpreter ()
+--evalProgram = mapM_ evalTopLevel
+--
+--run :: Program -> IO EvalState
+--run p = execStateT (evalProgram p) (EvalState{env=Map.empty, targets=Map.empty})

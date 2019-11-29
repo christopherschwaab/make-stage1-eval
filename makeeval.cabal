@@ -37,8 +37,9 @@ executable makeeval
                        Glob >=0.10.0,
                        filepath >=1.4.2.1,
                        parser-combinators >=1.2.0,
+                       docopt >=0.7.0.5,
   other-modules:       Parser, Syntax
-  default-extensions:  OverloadedStrings, TypeOperators
+  default-extensions:  OverloadedStrings, QuasiQuotes, TemplateHaskell
   default-language:    Haskell2010
 
 test-suite spec
