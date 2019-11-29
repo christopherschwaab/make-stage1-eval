@@ -172,77 +172,72 @@ evalBuiltin Basename e = Value . intercalate " " . map basename . splitFields . 
   where basename = pack . dropExtensions . unpack
 evalBuiltin Info e = evalExp e
 
---evalStmt :: Stmt -> Interpreter ()
---evalStmt (Bind override b e1 e2) = do -- FIXME override
---  Value x <- evalExp e1
---  case b of
---    DeferredBinder -> modify (\st -> st{env=Map.insert x (Deferred e2) (env st)})
---    ImmediateBinder -> do v <- evalExp e2
---                          modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
---    DefaultValueBinder -> do
---      st <- get
---      let p = env st
---      p' <- case Map.lookup x p of
---        Just _ -> return p
---        Nothing -> do v <- evalBuiltin Shell e2
---                      return (Map.insert x (Immediate v) p) -- is this immediate or deferred?
---      put (st{env=p'})
---    ShellBinder -> do v <- evalBuiltin Shell e2
---                      modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
---    AppendBinder -> do
---      st <- get
---      let p = env st
---      p' <- case Map.lookup x p of
---        Just (Immediate (Value v')) -> do
---          Value v <- evalExp e2
---          return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
---        Just (Deferred e') -> return (Map.insert x (Deferred (e' `cat` Lit " " `cat` e2)) p)
---        Nothing -> undefined -- what does make do in this case?
---      put (st{env=p'})
---evalStmt (SExp e) = () <$ evalExp e
---
---evalDirective :: Directive s -> Interpreter s
---evalDirective (VPath Nothing) = undefined -- FIXME
---evalDirective (VPath (Just (Left e))) = undefined -- FIXME
---evalDirective (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
---evalDirective (If pred ss1 ss2) = do
---  b <- evalIfPred pred
---  return (if b then ss1 else ss2)
---  where evalIfPred (EqPred e1 e2) = (==) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
---        evalIfPred (NeqPred e1 e2) = (/=) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
---        evalIfPred (DefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
---        evalIfPred (NotDefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
---
---evalRecipeLine :: RecipeLine -> Interpreter [Exp]
---evalRecipeLine (RExp e) = return [e]
---evalRecipeLine (RDirective d) = do rs <- evalDirective d
---                                   concat <$> mapM evalRecipeLine rs
---
+evalIf :: IfPred -> s -> s -> Interpreter s
+evalIf p s1 s2 = do b <- evalIfPred p
+                    return (if b then s1 else s2)
+  where evalIfPred (EqPred e1 e2) = (==) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
+        evalIfPred (NeqPred e1 e2) = (/=) <$> fmap fromValue (evalExp e1) <*> fmap fromValue (evalExp e2)
+        evalIfPred (DefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
+        evalIfPred (NotDefinedPred e) = flip Map.member <$> fmap env get <*> fmap fromValue (evalExp e)
+
+evalDirective :: Directive s -> Interpreter s
+evalDirective (VPath Nothing) = undefined -- FIXME
+evalDirective (VPath (Just (Left e))) = undefined -- FIXME
+evalDirective (VPath (Just (Right (e1, e2)))) = undefined -- FIXME
+evalDirective (If p ss1 ss2) = evalIf p ss1 ss2
+
+evalRecipeLine :: RecipeLine -> Interpreter [Exp]
+evalRecipeLine (RIf p ls1 ls2) = do rs <- evalIf p ls1 ls2
+                                    concat <$> mapM evalRecipeLine rs
+evalRecipeLine (RExp e) = return [e]
+
 ---- FIXME double check the order things get evaluated here
---evalRule :: Rule -> Interpreter ()
---evalRule (Rule ts d (Recipe es)) = do
---  vts <- mapM (fmap fromValue . evalExp) ts
---  deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
---  es' <- concat <$> mapM evalRecipeLine es
---  modify (\st -> st{targets = foldr (addTarget deps es') (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
---  where addTarget deps es' t m = Map.insert t (deps, es') m
+evalRule :: Rule -> Interpreter ()
+evalRule (Rule ts d (Recipe es)) = do
+  vts <- mapM (fmap fromValue . evalExp) ts
+  deps <- maybe (pure []) (fmap (T.lines . fromValue) . evalExp) d
+  es' <- concat <$> mapM evalRecipeLine es
+  modify (\st -> st{targets = foldr (addTarget deps es') (targets st) vts}) -- FIXME think make dies on  double defined targets? (except ::)
+  where addTarget deps es' t m = Map.insert t (deps, es') m
 --
---evalTopLevelDirective :: TopLevelDirective -> Interpreter Program
---evalTopLevelDirective (Include e) = do
---  f <- unpack . fromValue <$> evalExp e
---  r <- liftIO (parse makefile f <$> TIO.readFile f)
---  case r of
---    Left err -> error (errorBundlePretty err)
---    Right s -> return s
---
---evalTopLevel :: TopLevel -> Interpreter ()
---evalTopLevel (Stmt s) = evalStmt s
---evalTopLevel (Directive d) = evalProgram =<< evalDirective d
---evalTopLevel (TopLevelDirective d) = evalProgram =<< evalTopLevelDirective d
---evalTopLevel (RuleDecl r) = evalRule r
---
---evalProgram :: Program -> Interpreter ()
---evalProgram = mapM_ evalTopLevel
---
---run :: Program -> IO EvalState
---run p = execStateT (evalProgram p) (EvalState{env=Map.empty, targets=Map.empty})
+-- FIXME override
+evalAssign :: Bool -> Binder -> Exp -> Exp -> Interpreter ()
+evalAssign override b e1 e2 = do
+  Value x <- evalExp e1
+  case b of
+    DeferredBinder -> modify (\st -> st{env=Map.insert x (Deferred e2) (env st)})
+    ImmediateBinder -> do v <- evalExp e2
+                          modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
+    DefaultValueBinder -> do
+      st <- get
+      let p = env st
+      p' <- case Map.lookup x p of
+        Just _ -> return p
+        Nothing -> do v <- evalBuiltin Shell e2
+                      return (Map.insert x (Immediate v) p) -- is this immediate or deferred?
+      put (st{env=p'})
+    ShellBinder -> do v <- evalBuiltin Shell e2
+                      modify (\st -> st{env=Map.insert x (Immediate v) (env st)})
+    AppendBinder -> do
+      st <- get
+      let p = env st
+      p' <- case Map.lookup x p of
+        Just (Immediate (Value v')) -> do
+          Value v <- evalExp e2
+          return (Map.insert x (Immediate (Value (v' `append` " " `append` v))) p)
+        Just (Deferred e') -> return (Map.insert x (Deferred (e' `cat` Lit " " `cat` e2)) p)
+        Nothing -> undefined -- what does make do in this case?
+      put (st{env=p'})
+
+evalStmt :: Stmt -> Interpreter ()
+evalStmt (SExp e) = void (evalExp e)
+evalStmt (SRule r) = evalRule r
+evalStmt (Assign b e1 e2) = evalAssign False b e1 e2
+evalStmt (Override b e1 e2) = evalAssign True b e1 e2
+evalStmt (SDirective d) = void (evalDirective d)
+
+evalProgram :: SProgram -> Interpreter ()
+evalProgram = mapM_ evalStmt
+
+run :: SProgram -> IO EvalState
+run p = execStateT (evalProgram p) (EvalState{env=Map.empty, targets=Map.empty})

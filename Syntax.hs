@@ -131,6 +131,7 @@ data Stmt
   | SDirective (Directive [Stmt])
   deriving (Eq, Show)
 
+type SProgram = [Stmt]
 type Program = [Term]
 
 class PrettyAppExp sh where
@@ -249,3 +250,23 @@ prettyDirective prettyDStmt (Include e) = "include " `append` prettyExp e
 
 prettyProgram :: Program -> Text
 prettyProgram ts = T.intercalate "\n" (map prettyTerm ts)
+
+cat :: Exp -> Exp -> Exp
+cat (Lit t1) (Lit t2)
+  | T.null t1 = Lit t2
+  | T.null t2 = Lit t1
+  | otherwise = Lit (t1 `append` t2)
+cat e1 (Lit t2) | T.null t2 = e1
+                | otherwise = e1 `Cat` Lit t2
+cat (Lit t1) e2 | T.null t1 = e2
+                | otherwise = Lit t1 `Cat` e2
+cat e1 e2 = e1 `Cat` e2
+{-# INLINE cat #-}
+
+catr :: Exp -> Text -> Exp
+catr e t = e `cat` Lit t
+{-# INLINE catr #-}
+
+catl :: Text -> Exp -> Exp
+catl t e = Lit t `cat` e
+{-# INLINE catl #-}
