@@ -6,28 +6,35 @@ import Data.Text (pack)
 import Data.Text.IO hiding (putStr)
 import qualified Data.Text.IO as TIO
 import Text.Megaparsec
-import System.Console.Docopt
-import System.Environment (getArgs)
+import Options.Applicative
 
-import Parser
+import Parser (makefile)
 import Syntax
 
-usagePat :: Docopt
-usagePat = [docopt|
-makeeval
+data Options = Options
+  { optPrintRaw :: Bool
+  , optFilename :: String
+  }
 
-Usage:
-  makeeval [--raw] <file>
+optsParser :: Parser Options
+optsParser = Options
+  <$> switch
+      ( long "raw"
+     <> short 'r'
+     <> help "Print the raw (show) parse tree without pretty-printing.")
+  <*> argument str (metavar "FILE")
 
-Options:
-  -r, --raw    Print the raw (show) parse tree without pretty-printing.
-|]
+opts :: ParserInfo Options
+opts = info (optsParser <**> helper)
+  ( fullDesc
+ <> progDesc "Parse a makefile"
+ <> header "makeeval")
 
 main :: IO ()
 main = do
-  args <- parseArgsOrExit usagePat =<< getArgs
-  fname <- getArgOrExitWith usagePat args (argument "file")
+  args <- execParser opts
+  let fname = optFilename args
   r <- parse makefile fname <$> readFile fname
   case r of
     Left err -> putStr (errorBundlePretty err)
-    Right p -> TIO.putStr ((if args `isPresent` longOption "raw" then pack . show else prettyProgram) p)
+    Right p -> TIO.putStr ((if optPrintRaw args then pack . show else prettyProgram) p)
